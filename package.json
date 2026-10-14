@@ -10,7 +10,8 @@
   "licenseUrl": "http://www.opensource.org/licenses/mit-license.php",
   "scripts": {
     "dev": "vite --config vite/config.dev.mjs --host",
-    "build": "vite build --config vite/config.prod.mjs"
+    "build": "vite build --config vite/config.prod.mjs",
+    "server": "node server/socket-server.mjs"
   },
   "devDependencies": {
     "typescript": "~5.7.2",
@@ -18,6 +19,8 @@
   },
   "dependencies": {
     "phaser": "^3.90.0",
+    "socket.io": "^4.8.4",
+    "socket.io-client": "^4.8.4",
     "terser": "^5.39.0"
   }
 }

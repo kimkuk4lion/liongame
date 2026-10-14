@@ -1,22 +1,34 @@
-import { GAME_HEIGHT, GAME_WIDTH, MOVE_DURATION, MOVE_RANDOM } from "./constants";
+import { GAME_HEIGHT, GAME_WIDTH, MOVE_RANDOM } from "./constants";
 
-type Hole = {
-  id: number;
-  x: number;
-  y: number;
-};
+export type Hole = { id: number; x: number; y: number };
 
-type Marble = {
+export type Marble = {
   id: number;
+  name: string;
   x: number;
   y: number;
   lion: boolean;
   hole: number;
   alive: boolean;
   inHole: boolean;
+  score: number;
 };
 
-const HOLES: Hole[] = [
+export type GameState = "wait_move" | "moving" | "finished";
+
+export type RenderArgs = {
+  turn: number;
+  marbles: Marble[];
+  holes: Hole[];
+  state: GameState;
+  remainingSeconds: number;
+  winner?: Marble;
+};
+
+export type MoveResult = { playerId: number; x: number; y: number; force: number };
+export type RenderFunction = (args: RenderArgs) => void;
+
+export const HOLES: Hole[] = [
   { id: 0, x: 300, y: 950 },
   { id: 1, x: 300, y: 700 },
   { id: 2, x: 300, y: 400 },
@@ -25,123 +37,162 @@ const HOLES: Hole[] = [
   { id: 5, x: 300, y: 150 },
 ];
 
-type RenderArgs = {
-  turn: number;
-  marbles: Marble[];
-  holes: Hole[];
-  state: State;
-};
-
-type RenderFunction = (args: RenderArgs) => void;
-type State = "wait_move" | "moving";
-
 const MARBLE_RADIUS = 25 / 2;
 const HOLE_RADIUS = 35 / 2;
+const TURN_LIMIT_MS = 10_000;
+const SHOT_DURATION_MS = 900;
+const PUSH_DURATION_MS = 480;
 
 export class System {
-  private turn: number = 0;
-  private marbles: Marble[];
-  private holes: Hole[] = HOLES;
-  private state: State = "wait_move";
-  debugInfo: string;
+  private turn = 0;
+  private readonly marbles: Marble[];
+  private readonly holes = HOLES;
+  private state: GameState = "wait_move";
+  private remainingSeconds = 10;
+  private turnStartedAt = Date.now();
+  private timer: ReturnType<typeof setInterval> | undefined;
+  private winner: Marble | undefined;
 
-  constructor(private marbleCount: number, private renderFunction: RenderFunction) {
-    this.marbles = [];
-    for (let i = 0; i < marbleCount; i += 1) {
-      this.marbles.push({
-        id: i,
-        hole: 0,
-        lion: false,
-        x: 100 + i * 130,
-        y: 1200,
-        alive: true,
-        inHole: true,
-      });
-    }
-    this.debugInfo = `r:${MOVE_RANDOM}`;
+  constructor(
+    private readonly marbleCount: number,
+    private readonly renderFunction: RenderFunction,
+    names: string[] = []
+  ) {
+    this.marbles = Array.from({ length: marbleCount }, (_, i) => ({
+      id: i,
+      name: names[i] ?? `플레이어 ${i + 1}`,
+      hole: 0,
+      lion: false,
+      x: 100 + i * (marbleCount === 1 ? 0 : 400 / (marbleCount - 1)),
+      y: 1200,
+      alive: true,
+      inHole: true,
+      score: 0,
+    }));
+    this.timer = setInterval(() => this.tick(), 250);
   }
 
-  moveMarble(x: number, y: number) {
-    x = randomNumber(x - MOVE_RANDOM, x + MOVE_RANDOM);
-    y = randomNumber(y - MOVE_RANDOM, y + MOVE_RANDOM);
+  moveMarble(x: number, y: number, playerId = this.turn, randomize = false): MoveResult | undefined {
+    if (this.state !== "wait_move" || playerId !== this.turn || !this.marbles[playerId]?.alive) {
+      return undefined;
+    }
+    const marble = this.marbles[playerId];
+    const shotX = x - marble.x;
+    const shotY = y - marble.y;
+    const shotDistance = Math.hypot(shotX, shotY);
+    const force = clamp(shotDistance / 2, 0, 100);
+    if (randomize) {
+      x = randomNumber(x - MOVE_RANDOM, x + MOVE_RANDOM);
+      y = randomNumber(y - MOVE_RANDOM, y + MOVE_RANDOM);
+    }
     x = clamp(x, 10, GAME_WIDTH - 10);
     y = clamp(y, 10, GAME_HEIGHT - 10);
-    if (this.state !== "wait_move") {
-      throw Error("not wait_move");
-    }
     this.state = "moving";
-    const marble = this.marbles[this.turn];
     marble.inHole = false;
     const startX = marble.x;
     const startY = marble.y;
-    let i = 0;
-    const max = 30;
-    const duration = MOVE_DURATION;
+    const startedAt = performance.now();
     const f = () => {
-      i += 1;
-      marble.x = startX + ((x - startX) / max) * i;
-      marble.y = startY + ((y - startY) / max) * i;
-      if (this.checkCollision(marble)) {
-        this.state = "wait_move";
-        this.nextTurn();
+      const progress = Math.min(1, (performance.now() - startedAt) / SHOT_DURATION_MS);
+      const easedProgress = 1 - Math.pow(1 - progress, 3);
+      marble.x = startX + (x - startX) * easedProgress;
+      marble.y = startY + (y - startY) * easedProgress;
+      if (this.checkCollision(marble, shotX, shotY, force)) {
+        this.state = this.winner ? "finished" : "wait_move";
+        if (!this.winner) this.nextTurn();
         this.render();
         return;
       }
-
-      if (i !== max) {
-        this.render();
-        setTimeout(f, duration / max);
-        return;
-      }
-      this.state = "wait_move";
-      this.nextTurn();
       this.render();
+      if (progress < 1) {
+        requestAnimationFrame(f);
+      } else {
+        this.state = this.winner ? "finished" : "wait_move";
+        if (!this.winner) this.nextTurn();
+        this.render();
+      }
     };
     f();
+    return { playerId, x, y, force };
+  }
+
+  getSnapshot(): RenderArgs {
+    return {
+      turn: this.turn,
+      holes: this.holes,
+      marbles: this.marbles,
+      state: this.state,
+      remainingSeconds: this.remainingSeconds,
+      winner: this.winner,
+    };
+  }
+
+  render() {
+    this.renderFunction(this.getSnapshot());
+  }
+
+  destroy() {
+    if (this.timer) clearInterval(this.timer);
+  }
+
+  private tick() {
+    if (this.state === "finished") return;
+    this.remainingSeconds = Math.max(
+      0,
+      Math.ceil((TURN_LIMIT_MS - (Date.now() - this.turnStartedAt)) / 1000)
+    );
+    if (this.state === "wait_move" && this.remainingSeconds === 0) {
+      this.nextTurn();
+      this.render();
+    }
   }
 
   private nextTurn() {
-    this.turn += 1;
-    if (this.turn === this.marbleCount) {
-      this.turn = 0;
+    if (this.marbles.length === 0) return;
+    this.turn = (this.turn + 1) % this.marbleCount;
+    while (!this.marbles[this.turn].alive) {
+      this.turn = (this.turn + 1) % this.marbleCount;
     }
-    const turnMarble = this.marbles[this.turn];
-    if (!turnMarble.alive) {
-      this.nextTurn();
-    }
+    this.turnStartedAt = Date.now();
+    this.remainingSeconds = 10;
   }
 
-  private checkCollision(marble: Marble): boolean {
+  private checkCollision(marble: Marble, shotX: number, shotY: number, force: number): boolean {
     if (!marble.lion) {
       const targetHole = this.holes[marble.hole];
-
       if (collision(targetHole.x, targetHole.y, marble.x, marble.y, HOLE_RADIUS, MARBLE_RADIUS)) {
+        marble.score += 2;
         this.nextHole(marble);
         return true;
       }
     }
 
-    for (const otherMarble of this.marbles) {
-      if (otherMarble.id === marble.id || otherMarble.inHole || !otherMarble.alive) {
-        continue;
-      }
-      if (
-        collision(otherMarble.x, otherMarble.y, marble.x, marble.y, MARBLE_RADIUS, MARBLE_RADIUS)
-      ) {
-        if (marble.lion) {
-          otherMarble.alive = false;
-          return true;
-        }
+    for (const other of this.marbles) {
+      if (other.id === marble.id || !other.alive) continue;
+      if (!collision(other.x, other.y, marble.x, marble.y, MARBLE_RADIUS, MARBLE_RADIUS)) continue;
 
-        if (otherMarble.lion) {
-          marble.alive = false;
-          return true;
-        }
-
+      const shotLength = Math.hypot(shotX, shotY) || 1;
+      const pushDistance = 12 + force * 1.6;
+      this.animatePush(
+        other,
+        clamp(other.x + (shotX / shotLength) * pushDistance, 10, GAME_WIDTH - 10),
+        clamp(other.y + (shotY / shotLength) * pushDistance, 10, GAME_HEIGHT - 10)
+      );
+      if (other.inHole) {
+        other.inHole = false;
+        other.score = Math.max(0, other.score);
+        marble.score += 3;
+      } else if (marble.lion) {
+        other.alive = false;
+        marble.score += 2;
+      } else if (other.lion) {
+        marble.alive = false;
+      } else {
+        marble.score += 1;
         this.nextHole(marble);
-
-        return true;
       }
+      this.checkWinner();
+      return true;
     }
     return false;
   }
@@ -152,36 +203,39 @@ export class System {
     marble.x = targetHole.x;
     marble.y = targetHole.y;
     marble.hole += 1;
-    if (marble.hole === this.holes.length) {
-      marble.lion = true;
-    }
+    if (marble.hole === this.holes.length) marble.lion = true;
   }
 
-  render() {
-    this.renderFunction({
-      turn: this.turn,
-      holes: this.holes,
-      marbles: this.marbles,
-      state: this.state,
-    });
+  private animatePush(marble: Marble, targetX: number, targetY: number) {
+    const startX = marble.x;
+    const startY = marble.y;
+    const startedAt = performance.now();
+    const animate = () => {
+      const progress = Math.min(1, (performance.now() - startedAt) / PUSH_DURATION_MS);
+      // A damped spring gives the struck marble a soft impact and a short settle.
+      const easedProgress = 1 - Math.exp(-7 * progress) * Math.cos(10 * progress);
+      marble.x = clamp(startX + (targetX - startX) * easedProgress, 10, GAME_WIDTH - 10);
+      marble.y = clamp(startY + (targetY - startY) * easedProgress, 10, GAME_HEIGHT - 10);
+      this.render();
+      if (progress < 1) requestAnimationFrame(animate);
+    };
+    requestAnimationFrame(animate);
+  }
+
+  private checkWinner() {
+    const alive = this.marbles.filter((marble) => marble.alive);
+    const aliveLions = alive.filter((marble) => marble.lion);
+    if (alive.length === 1 || (aliveLions.length === 1 && alive.every((marble) => marble.lion))) {
+      this.winner = [...alive].sort((a, b) => b.score - a.score)[0];
+      this.state = "finished";
+    }
   }
 }
 
 function collision(x1: number, y1: number, x2: number, y2: number, d1: number, d2: number) {
-  const distance = Math.sqrt(Math.pow(x1 - x2, 2) + Math.pow(y1 - y2, 2));
-  return distance <= d1 + d2;
+  return Math.hypot(x1 - x2, y1 - y2) <= d1 + d2;
 }
 
-function randomNumber(min: number, max: number) {
-  return Math.random() * (max - min) + min;
-}
-
-function clamp(v: number, min: number, max: number) {
-  if (v < min) {
-    return min;
-  }
-  if (v > max) {
-    return max;
-  }
-  return v;
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
 }

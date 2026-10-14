@@ -1,6 +1,7 @@
 import { GAME_HEIGHT, GAME_WIDTH } from "../constants";
 import { Game as MainGame } from "./scenes/Game";
 import { AUTO, Game, Scale, Types } from "phaser";
+import type { GameSettings } from "../main";
 
 // Find out more information about the Game Config at:
 // https://docs.phaser.io/api-documentation/typedef/types-core#gameconfig
@@ -17,8 +18,11 @@ const config: Types.Core.GameConfig = {
   scene: [MainGame],
 };
 
-const StartGame = (parent: string) => {
-  return new Game({ ...config, parent });
+const StartGame = (parent: string, settings: GameSettings) => {
+  MainGame.initialSettings = settings;
+  return new Game({ ...config, parent, callbacks: {
+    preBoot: (game) => game.registry.set("settings", settings),
+  } });
 };
 
 export default StartGame;
