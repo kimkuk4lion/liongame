@@ -14,6 +14,8 @@ const config: Types.Core.GameConfig = {
   scale: {
     mode: Scale.FIT,
     autoCenter: Scale.CENTER_BOTH,
+    width: GAME_WIDTH,
+    height: GAME_HEIGHT,
   },
   scene: [MainGame],
 };

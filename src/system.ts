@@ -40,8 +40,8 @@ export const HOLES: Hole[] = [
 const MARBLE_RADIUS = 25 / 2;
 const HOLE_RADIUS = 35 / 2;
 const TURN_LIMIT_MS = 10_000;
-const SHOT_DURATION_MS = 900;
-const PUSH_DURATION_MS = 480;
+const SHOT_DURATION_MS = 1500;
+const PUSH_DURATION_MS = 850;
 
 export class System {
   private turn = 0;
@@ -94,22 +94,19 @@ export class System {
     const startedAt = performance.now();
     const f = () => {
       const progress = Math.min(1, (performance.now() - startedAt) / SHOT_DURATION_MS);
-      const easedProgress = 1 - Math.pow(1 - progress, 3);
+      const easedProgress = 1 - Math.pow(1 - progress, 2);
+      const previousX = marble.x;
+      const previousY = marble.y;
       marble.x = startX + (x - startX) * easedProgress;
       marble.y = startY + (y - startY) * easedProgress;
-      if (this.checkCollision(marble, shotX, shotY, force)) {
-        this.state = this.winner ? "finished" : "wait_move";
-        if (!this.winner) this.nextTurn();
-        this.render();
+      if (this.checkCollision(marble, shotX, shotY, force, previousX, previousY)) {
         return;
       }
       this.render();
       if (progress < 1) {
         requestAnimationFrame(f);
       } else {
-        this.state = this.winner ? "finished" : "wait_move";
-        if (!this.winner) this.nextTurn();
-        this.render();
+        this.finishMove();
       }
     };
     f();
@@ -149,51 +146,77 @@ export class System {
 
   private nextTurn() {
     if (this.marbles.length === 0) return;
-    this.turn = (this.turn + 1) % this.marbleCount;
-    while (!this.marbles[this.turn].alive) {
-      this.turn = (this.turn + 1) % this.marbleCount;
+    for (let offset = 1; offset <= this.marbleCount; offset += 1) {
+      const nextTurn = (this.turn + offset) % this.marbleCount;
+      if (!this.marbles[nextTurn].alive) continue;
+      this.turn = nextTurn;
+      this.turnStartedAt = Date.now();
+      this.remainingSeconds = 10;
+      return;
     }
-    this.turnStartedAt = Date.now();
-    this.remainingSeconds = 10;
+    this.checkWinner();
   }
 
-  private checkCollision(marble: Marble, shotX: number, shotY: number, force: number): boolean {
-    if (!marble.lion) {
-      const targetHole = this.holes[marble.hole];
-      if (collision(targetHole.x, targetHole.y, marble.x, marble.y, HOLE_RADIUS, MARBLE_RADIUS)) {
-        marble.score += 2;
-        this.nextHole(marble);
-        return true;
-      }
-    }
-
+  private checkCollision(
+    marble: Marble,
+    shotX: number,
+    shotY: number,
+    force: number,
+    previousX: number,
+    previousY: number
+  ): boolean {
     for (const other of this.marbles) {
       if (other.id === marble.id || !other.alive) continue;
+      if (other.inHole || this.isAtHole(other)) continue;
       if (!collision(other.x, other.y, marble.x, marble.y, MARBLE_RADIUS, MARBLE_RADIUS)) continue;
 
       const shotLength = Math.hypot(shotX, shotY) || 1;
-      const pushDistance = 12 + force * 1.6;
-      this.animatePush(
-        other,
-        clamp(other.x + (shotX / shotLength) * pushDistance, 10, GAME_WIDTH - 10),
-        clamp(other.y + (shotY / shotLength) * pushDistance, 10, GAME_HEIGHT - 10)
-      );
-      if (other.inHole) {
-        other.inHole = false;
-        other.score = Math.max(0, other.score);
-        marble.score += 3;
-      } else if (marble.lion) {
+      const collisionX = other.x - marble.x;
+      const collisionY = other.y - marble.y;
+      const collisionLength = Math.hypot(collisionX, collisionY);
+      const directionX = collisionLength > 0 ? collisionX / collisionLength : shotX / shotLength;
+      const directionY = collisionLength > 0 ? collisionY / collisionLength : shotY / shotLength;
+      const pushDistance = 80 + force * 3;
+      let targetX = clamp(other.x + directionX * pushDistance, 10, GAME_WIDTH - 10);
+      let targetY = clamp(other.y + directionY * pushDistance, 10, GAME_HEIGHT - 10);
+      if (marble.lion) {
         other.alive = false;
         marble.score += 2;
       } else if (other.lion) {
         marble.alive = false;
       } else {
         marble.score += 1;
-        this.nextHole(marble);
       }
       this.checkWinner();
+      if (other.alive) {
+        this.animatePush(other, targetX, targetY, () => this.finishMove());
+      } else {
+        this.finishMove();
+      }
       return true;
     }
+
+    if (!marble.lion) {
+      const targetHole = this.holes[marble.hole];
+      if (
+        collision(targetHole.x, targetHole.y, marble.x, marble.y, HOLE_RADIUS, MARBLE_RADIUS) ||
+        segmentCollision(
+          previousX,
+          previousY,
+          marble.x,
+          marble.y,
+          targetHole.x,
+          targetHole.y,
+          HOLE_RADIUS + MARBLE_RADIUS
+        )
+      ) {
+        marble.score += 2;
+        this.nextHole(marble);
+        this.finishMove();
+        return true;
+      }
+    }
+
     return false;
   }
 
@@ -206,18 +229,33 @@ export class System {
     if (marble.hole === this.holes.length) marble.lion = true;
   }
 
-  private animatePush(marble: Marble, targetX: number, targetY: number) {
+  private isAtHole(marble: Marble) {
+    return this.holes.some((hole) =>
+      collision(hole.x, hole.y, marble.x, marble.y, HOLE_RADIUS, MARBLE_RADIUS)
+    );
+  }
+
+  private finishMove() {
+    this.state = this.winner ? "finished" : "wait_move";
+    if (!this.winner) this.nextTurn();
+    this.render();
+  }
+
+  private animatePush(marble: Marble, targetX: number, targetY: number, onComplete: () => void) {
     const startX = marble.x;
     const startY = marble.y;
     const startedAt = performance.now();
     const animate = () => {
       const progress = Math.min(1, (performance.now() - startedAt) / PUSH_DURATION_MS);
-      // A damped spring gives the struck marble a soft impact and a short settle.
-      const easedProgress = 1 - Math.exp(-7 * progress) * Math.cos(10 * progress);
+      const easedProgress = 1 - Math.pow(1 - progress, 2);
       marble.x = clamp(startX + (targetX - startX) * easedProgress, 10, GAME_WIDTH - 10);
       marble.y = clamp(startY + (targetY - startY) * easedProgress, 10, GAME_HEIGHT - 10);
       this.render();
-      if (progress < 1) requestAnimationFrame(animate);
+      if (progress < 1) {
+        requestAnimationFrame(animate);
+      } else {
+        onComplete();
+      }
     };
     requestAnimationFrame(animate);
   }
@@ -225,7 +263,7 @@ export class System {
   private checkWinner() {
     const alive = this.marbles.filter((marble) => marble.alive);
     const aliveLions = alive.filter((marble) => marble.lion);
-    if (alive.length === 1 || (aliveLions.length === 1 && alive.every((marble) => marble.lion))) {
+    if (alive.length <= 1 || (aliveLions.length === 1 && alive.every((marble) => marble.lion))) {
       this.winner = [...alive].sort((a, b) => b.score - a.score)[0];
       this.state = "finished";
     }
@@ -236,6 +274,35 @@ function collision(x1: number, y1: number, x2: number, y2: number, d1: number, d
   return Math.hypot(x1 - x2, y1 - y2) <= d1 + d2;
 }
 
+function segmentCollision(
+  startX: number,
+  startY: number,
+  endX: number,
+  endY: number,
+  circleX: number,
+  circleY: number,
+  radius: number
+) {
+  const segmentX = endX - startX;
+  const segmentY = endY - startY;
+  const segmentLengthSquared = segmentX * segmentX + segmentY * segmentY;
+  const projection = segmentLengthSquared === 0
+    ? 0
+    : clamp(
+        ((circleX - startX) * segmentX + (circleY - startY) * segmentY) /
+          segmentLengthSquared,
+        0,
+        1
+      );
+  const closestX = startX + segmentX * projection;
+  const closestY = startY + segmentY * projection;
+  return Math.hypot(circleX - closestX, circleY - closestY) <= radius;
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+function randomNumber(min: number, max: number) {
+  return Math.random() * (max - min) + min;
 }
