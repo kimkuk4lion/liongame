@@ -1,4 +1,4 @@
-import { io, Socket } from "socket.io-client";
+import type { Socket } from "socket.io-client";
 import { Scene } from "phaser";
 import { MOVE_DURATION, MOVE_RANDOM } from "../../constants";
 import type { GameSettings } from "../../main";
@@ -10,6 +10,9 @@ export class Game extends Scene {
   private socket?: Socket;
   private system?: System;
   private dragging = false;
+  private aimTurn = -1;
+  private aimTurnId = 0;
+  private readonly cleanup: (() => void)[] = [];
 
   constructor() {
     super("Game");
@@ -61,14 +64,31 @@ export class Game extends Scene {
     , this.settings.names);
     this.system = system;
 
-    const onRemoteMove = (move: { playerId: number; x: number; y: number }) => {
-      if (move.playerId !== system.getSnapshot().turn) return;
+    const onRemoteMove = (move: { playerId: number; x: number; y: number; turnId?: number }) => {
+      this.settings.turnId = move.turnId;
+      if (move.playerId === this.settings.playerId || move.playerId !== system.getSnapshot().turn) return;
       system.moveMarble(move.x, move.y, move.playerId, false);
     };
     if (this.settings.mode === "multi") {
-      this.socket = io(this.settings.serverUrl);
+      if (!this.settings.socket) return;
+      this.socket = this.settings.socket;
       this.socket.on("game:move", onRemoteMove);
+      this.cleanup.push(() => this.socket?.off("game:move", onRemoteMove));
       this.socket.on("game:error", (message: string) => description.setText(message));
+      this.cleanup.push(() => this.socket?.off("game:error"));
+      const onTurn = (turn: { playerId: number; turnId: number; deadline: number }) => {
+        this.settings.turnId = turn.turnId;
+        this.dragging = false;
+        system.syncTurn(turn.playerId, Math.max(0, turn.deadline - Date.now()));
+      };
+      this.socket.on("game:turn", onTurn);
+      this.cleanup.push(() => this.socket?.off("game:turn", onTurn));
+      const onAborted = (data: { message: string }) => {
+        description.setText(data.message);
+        window.setTimeout(() => this.settings.onExit?.(), 800);
+      };
+      this.socket.on("game:aborted", onAborted);
+      this.cleanup.push(() => this.socket?.off("game:aborted", onAborted));
     }
 
     system.render();
@@ -118,8 +138,11 @@ export class Game extends Scene {
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
       const current = system.getSnapshot().marbles[system.getSnapshot().turn];
       if (!current || !current.alive || system.getSnapshot().state !== "wait_move") return;
+      if (this.settings.mode === "multi" && current.id !== this.settings.playerId) return;
       if (Math.hypot(pointer.x - current.x, pointer.y - current.y) > 40) return;
       this.dragging = true;
+      this.aimTurn = current.id;
+      this.aimTurnId += 1;
       updateAim(pointer);
     });
     this.input.on("pointermove", updateAim);
@@ -129,7 +152,9 @@ export class Game extends Scene {
       aimLine.setVisible(false);
       pullLine.setVisible(false);
       trajectory.clear().setVisible(false);
-      const current = system.getSnapshot().marbles[system.getSnapshot().turn];
+      const snapshot = system.getSnapshot();
+      const current = snapshot.marbles[snapshot.turn];
+      if (this.aimTurn !== snapshot.turn || (this.settings.mode === "multi" && current?.id !== this.settings.playerId)) return;
       if (!current) return;
       const pullX = current.x - pointer.x;
       const pullY = current.y - pointer.y;
@@ -145,16 +170,34 @@ export class Game extends Scene {
       if (!move) return;
       cursor.setPosition(launchX, launchY);
       this.time.delayedCall(MOVE_DURATION, () => cursor.setPosition(-9999, 0));
-      this.socket?.emit("game:move", { roomId: this.settings.roomId, ...move });
+      if (this.settings.mode === "multi") {
+        this.socket?.emit("game:move", { roomId: this.settings.roomId, turnId: this.settings.turnId, x: move.x, y: move.y });
+      }
     };
     this.input.on("pointerup", shoot);
     this.input.on("pointerupoutside", shoot);
+    this.cleanup.push(() => {
+      this.input.off("pointerdown");
+      this.input.off("pointermove");
+      this.input.off("pointerup");
+      this.input.off("pointerupoutside");
+    });
+    this.events.once("shutdown", () => this.cleanupScene());
+    this.events.once("destroy", () => this.cleanupScene());
+    const back = document.createElement("button");
+    back.id = "game-back";
+    back.textContent = "메인으로";
+    back.addEventListener("click", () => {
+      if (window.confirm("게임을 나가면 경기가 중단됩니다. 메인으로 이동할까요?")) this.settings.onExit?.();
+    });
+    document.getElementById("game-container")?.append(back);
+    this.cleanup.push(() => back.remove());
   }
 
-  shutdown() {
+  private cleanupScene() {
     this.dragging = false;
+    this.cleanup.splice(0).forEach((dispose) => dispose());
     this.system?.destroy();
-    this.socket?.disconnect();
   }
 
   private render(

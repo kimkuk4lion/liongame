@@ -52,6 +52,8 @@ export class System {
   private turnStartedAt = Date.now();
   private timer: ReturnType<typeof setInterval> | undefined;
   private winner: Marble | undefined;
+  private destroyed = false;
+  private frameIds = new Set<number>();
 
   constructor(
     private readonly marbleCount: number,
@@ -73,7 +75,7 @@ export class System {
   }
 
   moveMarble(x: number, y: number, playerId = this.turn, randomize = false): MoveResult | undefined {
-    if (this.state !== "wait_move" || playerId !== this.turn || !this.marbles[playerId]?.alive) {
+    if (this.destroyed || this.state !== "wait_move" || playerId !== this.turn || !this.marbles[playerId]?.alive) {
       return undefined;
     }
     const marble = this.marbles[playerId];
@@ -93,6 +95,7 @@ export class System {
     const startY = marble.y;
     const startedAt = performance.now();
     const f = () => {
+      if (this.destroyed) return;
       const progress = Math.min(1, (performance.now() - startedAt) / SHOT_DURATION_MS);
       const easedProgress = 1 - Math.pow(1 - progress, 2);
       const previousX = marble.x;
@@ -104,7 +107,7 @@ export class System {
       }
       this.render();
       if (progress < 1) {
-        requestAnimationFrame(f);
+        this.trackFrame(requestAnimationFrame(f));
       } else {
         this.finishMove();
       }
@@ -125,11 +128,24 @@ export class System {
   }
 
   render() {
+    if (this.destroyed) return;
     this.renderFunction(this.getSnapshot());
   }
 
   destroy() {
+    this.destroyed = true;
     if (this.timer) clearInterval(this.timer);
+    this.frameIds.forEach((frameId) => cancelAnimationFrame(frameId));
+    this.frameIds.clear();
+  }
+
+  syncTurn(playerId: number, remainingMs: number) {
+    if (this.destroyed || !this.marbles[playerId]?.alive) return;
+    this.turn = playerId;
+    this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - remainingMs);
+    this.remainingSeconds = Math.ceil(Math.max(0, remainingMs) / 1000);
+    this.state = "wait_move";
+    this.render();
   }
 
   private tick() {
@@ -167,7 +183,6 @@ export class System {
   ): boolean {
     for (const other of this.marbles) {
       if (other.id === marble.id || !other.alive) continue;
-      if (other.inHole || this.isAtHole(other)) continue;
       if (!collision(other.x, other.y, marble.x, marble.y, MARBLE_RADIUS, MARBLE_RADIUS)) continue;
 
       const shotLength = Math.hypot(shotX, shotY) || 1;
@@ -185,7 +200,8 @@ export class System {
       } else if (other.lion) {
         marble.alive = false;
       } else {
-        marble.score += 1;
+        marble.score += other.inHole ? 3 : 1;
+        other.inHole = false;
       }
       this.checkWinner();
       if (other.alive) {
@@ -226,13 +242,10 @@ export class System {
     marble.x = targetHole.x;
     marble.y = targetHole.y;
     marble.hole += 1;
-    if (marble.hole === this.holes.length) marble.lion = true;
-  }
-
-  private isAtHole(marble: Marble) {
-    return this.holes.some((hole) =>
-      collision(hole.x, hole.y, marble.x, marble.y, HOLE_RADIUS, MARBLE_RADIUS)
-    );
+    if (marble.hole === this.holes.length) {
+      marble.lion = true;
+      marble.inHole = false;
+    }
   }
 
   private finishMove() {
@@ -246,18 +259,24 @@ export class System {
     const startY = marble.y;
     const startedAt = performance.now();
     const animate = () => {
+      if (this.destroyed) return;
       const progress = Math.min(1, (performance.now() - startedAt) / PUSH_DURATION_MS);
       const easedProgress = 1 - Math.pow(1 - progress, 2);
       marble.x = clamp(startX + (targetX - startX) * easedProgress, 10, GAME_WIDTH - 10);
       marble.y = clamp(startY + (targetY - startY) * easedProgress, 10, GAME_HEIGHT - 10);
       this.render();
       if (progress < 1) {
-        requestAnimationFrame(animate);
+        this.trackFrame(requestAnimationFrame(animate));
       } else {
         onComplete();
       }
     };
-    requestAnimationFrame(animate);
+    this.trackFrame(requestAnimationFrame(animate));
+  }
+
+  private trackFrame(frameId: number) {
+    this.frameIds.add(frameId);
+    return frameId;
   }
 
   private checkWinner() {
