@@ -6,12 +6,16 @@ export type GameSettings = {
   mode: "practice" | "multi";
   playerCount: number;
   names: string[];
+  playerIds?: number[];
   roomId?: string;
+  gameId?: number;
+  initialState?: unknown;
   serverUrl: string;
   playerId?: number;
   turnId?: number;
   socket?: Socket;
   onExit?: () => void;
+  onAbort?: () => void;
 };
 
 const SERVER_URL = import.meta.env.VITE_SOCKET_URL || (location.protocol === "https:" ? `${location.origin}` : "http://localhost:3001");
@@ -19,13 +23,26 @@ let nickname = "플레이어";
 let socket: Socket | undefined;
 let game: PhaserGame | undefined;
 let screenGeneration = 0;
+let screen: "main" | "waiting" | "playing" = "main";
+let roomSession: { roomId: string; playerId: number } | undefined;
+let navigationTimer: number | undefined;
+
+function clearNavigationTimer() {
+  if (navigationTimer !== undefined) {
+    window.clearTimeout(navigationTimer);
+    navigationTimer = undefined;
+  }
+}
 
 document.addEventListener("DOMContentLoaded", () => {
   showLobby();
 });
 
 function showLobby() {
+  clearNavigationTimer();
   screenGeneration += 1;
+  screen = "main";
+  roomSession = undefined;
   game?.destroy(true);
   game = undefined;
   socket?.disconnect();
@@ -54,6 +71,8 @@ function showLobby() {
 }
 
 function showMultiplayer(root: HTMLElement) {
+  clearNavigationTimer();
+  screen = "waiting";
   root.innerHTML = `
     <main class="lobby">
       <h1>멀티플레이</h1>
@@ -72,21 +91,25 @@ function showMultiplayer(root: HTMLElement) {
   socket = io(SERVER_URL, { autoConnect: false });
   const currentSocket = socket;
   currentSocket.connect();
+  currentSocket.once("disconnect", () => { if (generation === screenGeneration && screen === "waiting") status.textContent = "서버 연결이 끊겼습니다."; });
   const status = root.querySelector("#lobby-status") as HTMLElement;
   let roomCode = "";
+  let requestPending = false;
   const cancel = document.createElement("button");
+  cancel.id = "main-cancel";
   cancel.textContent = "메인으로";
   cancel.addEventListener("click", showLobby);
   root.querySelector(".panel")?.append(cancel);
   currentSocket.on("connect", () => { status.textContent = "방을 만들거나 방 코드를 입력하세요."; });
   currentSocket.on("connect_error", () => { status.textContent = "멀티플레이 서버에 연결할 수 없습니다. 서버를 먼저 실행하세요."; });
-  currentSocket.on("room:created", (room: { roomId: string; count: number }) => {
+  const onCreated = (room: { roomId: string; count: number; playerId: number }) => {
     if (generation !== screenGeneration) return;
     roomCode = room.roomId;
+    roomSession = { roomId: room.roomId, playerId: room.playerId };
     status.textContent = `방 코드: ${roomCode} · ${room.count}명 입장 대기 중`;
-  });
-  currentSocket.on("room:update", (room: { roomId: string; count: number; maxPlayers: number; hostId: number; players: { id: number; name: string; isHost: boolean }[]; status: string }) => {
-    if (generation !== screenGeneration) return;
+  };
+  const onRoomUpdate = (room: { roomId: string; count: number; maxPlayers: number; hostId: number; players: { id: number; name: string; isHost: boolean }[]; status: string }) => {
+    if (generation !== screenGeneration || screen !== "waiting") return;
     roomCode = room.roomId;
     status.textContent = `방 코드: ${roomCode} · ${room.count}/${room.maxPlayers}명`;
     if (!root.querySelector("#leave-room")) {
@@ -95,43 +118,130 @@ function showMultiplayer(root: HTMLElement) {
       leave.textContent = "방 나가기";
       leave.addEventListener("click", () => {
         currentSocket.emit("room:leave", { roomId: roomCode }, () => showLobby());
-        window.setTimeout(() => { if (generation === screenGeneration) showLobby(); }, 800);
+        navigationTimer = window.setTimeout(() => {
+          navigationTimer = undefined;
+          if (generation === screenGeneration) showLobby();
+        }, 800);
       });
       root.querySelector(".panel")?.append(leave);
     }
-    root.querySelector("#start-game")?.remove();
-    if (room.hostId === room.players.find((player) => player.isHost)?.id && room.count >= room.maxPlayers && room.status === "waiting") addStartButton(root, currentSocket, () => roomCode);
-  });
-  currentSocket.on("game:start", (data: { roomId: string; names: string[]; playerId: number; turnId: number; deadline: number }) => {
+    const startButton = root.querySelector("#lobby-start-button") as HTMLButtonElement | null;
+    if (startButton) startButton.remove();
+    if (roomSession?.playerId === room.hostId && room.count >= room.maxPlayers && room.status === "waiting") addStartButton(root, currentSocket, () => roomCode);
+  };
+  const onStart = (data: { roomId: string; gameId: number; playerId: number; turnId: number; deadline: number; players: { id: number; name: string }[]; state: unknown }) => {
     if (generation !== screenGeneration) return;
-    start({ mode: "multi", playerCount: data.names.length, names: data.names, roomId: data.roomId, playerId: data.playerId, turnId: data.turnId, serverUrl: SERVER_URL, socket: currentSocket });
-  });
-  currentSocket.on("game:error", (message: string) => { if (generation === screenGeneration) status.textContent = message; });
+    dispose();
+    screen = "playing";
+    start({
+      mode: "multi",
+      playerCount: data.players.length,
+      names: data.players.map((player) => player.name),
+      playerIds: data.players.map((player) => player.id),
+      roomId: data.roomId,
+      gameId: data.gameId,
+      playerId: data.playerId,
+      turnId: data.turnId,
+      initialState: data.state,
+      serverUrl: SERVER_URL,
+      socket: currentSocket,
+      onAbort: () => {
+        if (generation === screenGeneration && screen === "playing") {
+          showWaiting(root, currentSocket, roomCode, generation);
+        }
+      },
+    });
+  };
+  const onError = (message: string) => { if (generation === screenGeneration) status.textContent = message; requestPending = false; setLobbyButtons(root, false); };
+  currentSocket.on("room:created", onCreated);
+  currentSocket.on("room:update", onRoomUpdate);
+  currentSocket.on("game:start", onStart);
+  currentSocket.on("game:error", onError);
+  const dispose = () => {
+    currentSocket.off("room:created", onCreated);
+    currentSocket.off("room:update", onRoomUpdate);
+    currentSocket.off("game:start", onStart);
+    currentSocket.off("game:error", onError);
+  };
   root.querySelector("#create")?.addEventListener("click", () => {
+    if (!currentSocket.connected || requestPending) return;
     nickname = inputValue(root, "#nickname", nickname);
-    currentSocket.emit("room:create", { name: nickname, maxPlayers: Number(inputValue(root, "#count", "2")) });
+    requestPending = true; setLobbyButtons(root, true);
+    currentSocket.emit("room:create", { name: nickname, maxPlayers: Number(inputValue(root, "#count", "2")) }, (result: { ok: boolean; error?: string }) => {
+      if (!result?.ok) onError(result?.error || "방 생성에 실패했습니다.");
+    });
   });
   root.querySelector("#join")?.addEventListener("click", () => {
+    if (!currentSocket.connected || requestPending) return;
     nickname = inputValue(root, "#nickname", nickname);
     roomCode = inputValue(root, "#room", "").toUpperCase();
-    currentSocket.emit("room:join", { roomId: roomCode, name: nickname });
+    requestPending = true; setLobbyButtons(root, true);
+    currentSocket.emit("room:join", { roomId: roomCode, name: nickname }, (result: { ok: boolean; playerId?: number; error?: string }) => {
+      if (result?.ok && result.playerId !== undefined) roomSession = { roomId: roomCode, playerId: result.playerId };
+      else onError(result?.error || "방 참여에 실패했습니다.");
+    });
+  });
+  root.querySelector(".panel")?.addEventListener("click", (event) => {
+    if ((event.target as HTMLElement).id === "main-cancel") { dispose(); showLobby(); }
   });
 }
 
 function addStartButton(root: HTMLElement, socket: Socket, roomId: () => string) {
-  if (root.querySelector("#start-game")) return;
+  if (root.querySelector("#lobby-start-button")) return;
   const button = document.createElement("button");
-  button.id = "start-game";
+  button.id = "lobby-start-button";
   button.textContent = "게임 시작";
-  button.addEventListener("click", () => socket.emit("room:start", { roomId: roomId() }));
+  button.addEventListener("click", () => {
+    button.disabled = true;
+    socket.emit("room:start", { roomId: roomId() }, (result: { ok: boolean }) => { if (!result?.ok) button.disabled = false; });
+  });
   root.querySelector(".panel")?.append(button);
   if (!root.querySelector("#leave-room")) {
     const leave = document.createElement("button");
     leave.id = "leave-room";
     leave.textContent = "방 나가기";
-    leave.addEventListener("click", () => { socket.emit("room:leave", {}, () => showLobby()); window.setTimeout(showLobby, 800); });
+    leave.addEventListener("click", () => {
+      socket.emit("room:leave", {}, () => showLobby());
+      navigationTimer = window.setTimeout(() => {
+        navigationTimer = undefined;
+        showLobby();
+      }, 800);
+    });
     root.querySelector(".panel")?.append(leave);
   }
+}
+
+function showWaiting(root: HTMLElement, socket: Socket, roomId: string, generation: number) {
+  clearNavigationTimer();
+  if (generation !== screenGeneration) return;
+  screen = "waiting";
+  root.innerHTML = `<main class="lobby"><h1>대기방</h1><section class="panel"><p id="lobby-status" class="status">방 코드: ${escapeHtml(roomId)}</p><button id="waiting-leave">방 나가기</button></section></main>`;
+  root.querySelector("#waiting-leave")?.addEventListener("click", () => {
+    socket.emit("room:leave", { roomId }, () => showLobby());
+    navigationTimer = window.setTimeout(() => {
+      navigationTimer = undefined;
+      if (generation === screenGeneration) showLobby();
+    }, 800);
+  });
+  const status = root.querySelector("#lobby-status") as HTMLElement;
+  const onUpdate = (room: { roomId: string; count: number; maxPlayers: number; hostId: number; status: string }) => {
+    if (generation !== screenGeneration || screen !== "waiting") return;
+    status.textContent = `방 코드: ${room.roomId} · ${room.count}/${room.maxPlayers}명`;
+    root.querySelector("#lobby-start-button")?.remove();
+    if (roomSession?.playerId === room.hostId && room.count >= room.maxPlayers && room.status === "waiting") addStartButton(root, socket, () => roomId);
+  };
+  const onStart = (data: { roomId: string; gameId: number; playerId: number; turnId: number; players: { id: number; name: string }[]; state: unknown }) => {
+    if (generation !== screenGeneration) return;
+    screen = "playing";
+    start({ mode: "multi", playerCount: data.players.length, names: data.players.map((player) => player.name), playerIds: data.players.map((player) => player.id), roomId: data.roomId, gameId: data.gameId, playerId: data.playerId, turnId: data.turnId, initialState: data.state, serverUrl: SERVER_URL, socket, onAbort: () => showWaiting(root, socket, roomId, generation) });
+  };
+  socket.on("room:update", onUpdate);
+  socket.on("game:start", onStart);
+  socket.on("game:error", (message: string) => { if (generation === screenGeneration) status.textContent = message; });
+}
+
+function setLobbyButtons(root: HTMLElement, disabled: boolean) {
+  root.querySelectorAll<HTMLButtonElement>("#create, #join, #lobby-start-button").forEach((button) => { button.disabled = disabled; });
 }
 
 function inputValue(root: HTMLElement, selector: string, fallback: string) {
@@ -139,8 +249,24 @@ function inputValue(root: HTMLElement, selector: string, fallback: string) {
 }
 
 function start(settings: GameSettings) {
-  document.getElementById("game-container")!.innerHTML = "";
-  settings.onExit = showLobby;
+  clearNavigationTimer();
+  const root = document.getElementById("game-container")!;
+  root.innerHTML = "";
+  const onExit = settings.onExit ?? showLobby;
+  const onAbort = settings.onAbort;
+  settings.onExit = () => {
+    game?.destroy(true);
+    game = undefined;
+    onExit();
+  };
+  settings.onAbort = onAbort
+    ? () => {
+      game?.destroy(true);
+      game = undefined;
+      onAbort();
+    }
+    : undefined;
+  game?.destroy(true);
   game = StartGame("game-container", settings);
 }
 

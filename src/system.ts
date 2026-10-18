@@ -54,31 +54,37 @@ export class System {
   private winner: Marble | undefined;
   private destroyed = false;
   private frameIds = new Set<number>();
+  private readonly indexById = new Map<number, number>();
+  private lastRenderedSeconds = 10;
+  private serverAnimationToken = 0;
 
   constructor(
-    private readonly marbleCount: number,
+    playerIds: number[],
     private readonly renderFunction: RenderFunction,
-    names: string[] = []
+    names: string[] = [],
+    private readonly serverControlled = false
   ) {
-    this.marbles = Array.from({ length: marbleCount }, (_, i) => ({
-      id: i,
+    this.marbles = playerIds.map((id, i) => ({
+      id,
       name: names[i] ?? `플레이어 ${i + 1}`,
       hole: 0,
       lion: false,
-      x: 100 + i * (marbleCount === 1 ? 0 : 400 / (marbleCount - 1)),
+      x: 100 + i * (playerIds.length === 1 ? 0 : 400 / (playerIds.length - 1)),
       y: 1200,
       alive: true,
       inHole: true,
       score: 0,
     }));
+    this.marbles.forEach((marble, index) => this.indexById.set(marble.id, index));
     this.timer = setInterval(() => this.tick(), 250);
   }
 
   moveMarble(x: number, y: number, playerId = this.turn, randomize = false): MoveResult | undefined {
-    if (this.destroyed || this.state !== "wait_move" || playerId !== this.turn || !this.marbles[playerId]?.alive) {
+    const index = this.indexById.get(playerId);
+    if (this.destroyed || this.serverControlled || this.state !== "wait_move" || index === undefined || playerId !== this.turn || !this.marbles[index]?.alive) {
       return undefined;
     }
-    const marble = this.marbles[playerId];
+    const marble = this.marbles[index];
     const shotX = x - marble.x;
     const shotY = y - marble.y;
     const shotDistance = Math.hypot(shotX, shotY);
@@ -107,7 +113,7 @@ export class System {
       }
       this.render();
       if (progress < 1) {
-        this.trackFrame(requestAnimationFrame(f));
+        this.trackFrame(f);
       } else {
         this.finishMove();
       }
@@ -140,20 +146,77 @@ export class System {
   }
 
   syncTurn(playerId: number, remainingMs: number) {
-    if (this.destroyed || !this.marbles[playerId]?.alive) return;
+    const index = this.indexById.get(playerId);
+    if (this.destroyed || index === undefined || !this.marbles[index]?.alive) return;
     this.turn = playerId;
     this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - remainingMs);
     this.remainingSeconds = Math.ceil(Math.max(0, remainingMs) / 1000);
     this.state = "wait_move";
+    this.lastRenderedSeconds = this.remainingSeconds;
     this.render();
   }
 
+  applyServerState(state: {
+    version: number;
+    gameId?: number;
+    turnId: number;
+    turnPlayerId: number;
+    deadline: number;
+    state: GameState;
+    marbles: Marble[];
+    winnerId?: number;
+  }) {
+    if (this.destroyed) return;
+    const previousPositions = new Map(this.marbles.map((marble) => [marble.id, { x: marble.x, y: marble.y }]));
+    const incoming = new Map(state.marbles.map((marble) => [marble.id, marble]));
+    this.marbles.forEach((marble) => {
+      const next = incoming.get(marble.id);
+      if (next) {
+        const position = previousPositions.get(marble.id);
+        Object.assign(marble, next);
+        if (position) {
+          marble.x = position.x;
+          marble.y = position.y;
+        }
+      }
+    });
+    this.turn = state.turnPlayerId;
+    this.state = state.state;
+    this.winner = state.winnerId === undefined ? undefined : this.marbles[this.indexById.get(state.winnerId) ?? -1];
+    this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - Math.max(0, state.deadline - Date.now()));
+    this.remainingSeconds = Math.ceil(Math.max(0, state.deadline - Date.now()) / 1000);
+    this.lastRenderedSeconds = this.remainingSeconds;
+    const token = ++this.serverAnimationToken;
+    const start = performance.now();
+    const duration = SHOT_DURATION_MS;
+    const animate = (timestamp: number) => {
+      if (this.destroyed || token !== this.serverAnimationToken) return;
+      const progress = Math.min(1, (timestamp - start) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      this.marbles.forEach((marble) => {
+        const from = previousPositions.get(marble.id);
+        const target = incoming.get(marble.id);
+        if (from && target) {
+          marble.x = from.x + (target.x - from.x) * eased;
+          marble.y = from.y + (target.y - from.y) * eased;
+        }
+      });
+      this.render();
+      if (progress < 1) this.trackFrame(animate);
+    };
+    this.trackFrame(animate);
+  }
+
   private tick() {
-    if (this.state === "finished") return;
+    if (this.state === "finished" || this.serverControlled) return;
     this.remainingSeconds = Math.max(
       0,
       Math.ceil((TURN_LIMIT_MS - (Date.now() - this.turnStartedAt)) / 1000)
     );
+    if (this.remainingSeconds !== this.lastRenderedSeconds) {
+      this.lastRenderedSeconds = this.remainingSeconds;
+      this.render();
+    }
     if (this.state === "wait_move" && this.remainingSeconds === 0) {
       this.nextTurn();
       this.render();
@@ -162,10 +225,11 @@ export class System {
 
   private nextTurn() {
     if (this.marbles.length === 0) return;
-    for (let offset = 1; offset <= this.marbleCount; offset += 1) {
-      const nextTurn = (this.turn + offset) % this.marbleCount;
+    for (let offset = 1; offset <= this.marbles.length; offset += 1) {
+      const currentIndex = this.indexById.get(this.turn) ?? 0;
+      const nextTurn = (currentIndex + offset) % this.marbles.length;
       if (!this.marbles[nextTurn].alive) continue;
-      this.turn = nextTurn;
+      this.turn = this.marbles[nextTurn].id;
       this.turnStartedAt = Date.now();
       this.remainingSeconds = 10;
       return;
@@ -266,17 +330,21 @@ export class System {
       marble.y = clamp(startY + (targetY - startY) * easedProgress, 10, GAME_HEIGHT - 10);
       this.render();
       if (progress < 1) {
-        this.trackFrame(requestAnimationFrame(animate));
+        this.trackFrame(animate);
       } else {
         onComplete();
       }
     };
-    this.trackFrame(requestAnimationFrame(animate));
+    this.trackFrame(animate);
   }
 
-  private trackFrame(frameId: number) {
+  private trackFrame(callback: FrameRequestCallback) {
+    let frameId = 0;
+    frameId = requestAnimationFrame((timestamp) => {
+      this.frameIds.delete(frameId);
+      callback(timestamp);
+    });
     this.frameIds.add(frameId);
-    return frameId;
   }
 
   private checkWinner() {

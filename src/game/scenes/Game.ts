@@ -12,6 +12,10 @@ export class Game extends Scene {
   private dragging = false;
   private aimTurn = -1;
   private aimTurnId = 0;
+  private requestSequence = 0;
+  private latestVersion = 0;
+  private aborted = false;
+  private abortTimer: number | undefined;
   private readonly cleanup: (() => void)[] = [];
 
   constructor() {
@@ -59,23 +63,37 @@ export class Game extends Scene {
       .setDepth(4).setLineWidth(4, 1).setVisible(false);
     const trajectory = this.add.graphics().setDepth(4).setVisible(false);
     const cursor = this.add.circle(-9999, 0, MOVE_RANDOM, 0x0000ff, 0.2).setDepth(-1);
-    const system = new System(this.settings.playerCount, (args) =>
+    const playerIds = this.settings.playerIds ?? Array.from({ length: this.settings.playerCount }, (_, index) => index);
+    const system = new System(playerIds, (args) =>
       this.render(args, marbleImages, labels, description, guideLine, powerText)
-    , this.settings.names);
+    , this.settings.names, this.settings.mode === "multi");
     this.system = system;
+    if (this.settings.mode === "multi" && this.settings.initialState) {
+      system.applyServerState(this.settings.initialState as Parameters<System["applyServerState"]>[0]);
+    }
 
-    const onRemoteMove = (move: { playerId: number; x: number; y: number; turnId?: number }) => {
-      this.settings.turnId = move.turnId;
-      if (move.playerId === this.settings.playerId || move.playerId !== system.getSnapshot().turn) return;
-      system.moveMarble(move.x, move.y, move.playerId, false);
+    const onState = (state: { version: number; gameId: number; turnId: number; turnPlayerId: number; deadline: number; state: "wait_move" | "moving" | "finished"; marbles: Marble[]; winnerId?: number }) => {
+      if (state.gameId !== this.settings.gameId || state.version <= this.latestVersion) return;
+      this.latestVersion = state.version;
+      this.settings.turnId = state.turnId;
+      this.cancelAim(aimLine, pullLine, trajectory, powerText);
+      system.applyServerState(state);
     };
     if (this.settings.mode === "multi") {
       if (!this.settings.socket) return;
       this.socket = this.settings.socket;
-      this.socket.on("game:move", onRemoteMove);
-      this.cleanup.push(() => this.socket?.off("game:move", onRemoteMove));
-      this.socket.on("game:error", (message: string) => description.setText(message));
-      this.cleanup.push(() => this.socket?.off("game:error"));
+      this.socket.on("game:state", onState);
+      this.cleanup.push(() => this.socket?.off("game:state", onState));
+      const onError = (message: string) => {
+        description.setText(message);
+        system.applyServerState({
+          version: this.latestVersion + 1, gameId: this.settings.gameId ?? 0, turnId: this.settings.turnId ?? 0,
+          turnPlayerId: system.getSnapshot().turn, deadline: Date.now(), state: "wait_move",
+          marbles: system.getSnapshot().marbles,
+        });
+      };
+      this.socket.on("game:error", onError);
+      this.cleanup.push(() => this.socket?.off("game:error", onError));
       const onTurn = (turn: { playerId: number; turnId: number; deadline: number }) => {
         this.settings.turnId = turn.turnId;
         this.dragging = false;
@@ -84,8 +102,11 @@ export class Game extends Scene {
       this.socket.on("game:turn", onTurn);
       this.cleanup.push(() => this.socket?.off("game:turn", onTurn));
       const onAborted = (data: { message: string }) => {
+        if (this.aborted) return;
+        this.aborted = true;
         description.setText(data.message);
-        window.setTimeout(() => this.settings.onExit?.(), 800);
+        this.cleanupAim(aimLine, pullLine, trajectory, powerText);
+        this.abortTimer = window.setTimeout(() => this.settings.onAbort?.(), 800);
       };
       this.socket.on("game:aborted", onAborted);
       this.cleanup.push(() => this.socket?.off("game:aborted", onAborted));
@@ -94,7 +115,8 @@ export class Game extends Scene {
     system.render();
     const updateAim = (pointer: Phaser.Input.Pointer) => {
       if (!this.dragging) return;
-      const current = system.getSnapshot().marbles[system.getSnapshot().turn];
+      const snapshot = system.getSnapshot();
+      const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
       if (!current) return;
       const pullX = current.x - pointer.x;
       const pullY = current.y - pointer.y;
@@ -136,24 +158,24 @@ export class Game extends Scene {
       graphics.setVisible(true);
     };
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
-      const current = system.getSnapshot().marbles[system.getSnapshot().turn];
-      if (!current || !current.alive || system.getSnapshot().state !== "wait_move") return;
+      const snapshot = system.getSnapshot();
+      const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
+      if (!current || !current.alive || snapshot.state !== "wait_move") return;
       if (this.settings.mode === "multi" && current.id !== this.settings.playerId) return;
       if (Math.hypot(pointer.x - current.x, pointer.y - current.y) > 40) return;
+      if (this.settings.mode === "multi" && current.id !== this.settings.playerId) return;
       this.dragging = true;
       this.aimTurn = current.id;
-      this.aimTurnId += 1;
+      this.aimTurnId = this.settings.turnId ?? this.aimTurnId + 1;
       updateAim(pointer);
     });
     this.input.on("pointermove", updateAim);
     const shoot = (pointer: Phaser.Input.Pointer) => {
       if (!this.dragging) return;
       this.dragging = false;
-      aimLine.setVisible(false);
-      pullLine.setVisible(false);
-      trajectory.clear().setVisible(false);
+      this.cleanupAim(aimLine, pullLine, trajectory, powerText);
       const snapshot = system.getSnapshot();
-      const current = snapshot.marbles[snapshot.turn];
+      const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
       if (this.aimTurn !== snapshot.turn || (this.settings.mode === "multi" && current?.id !== this.settings.playerId)) return;
       if (!current) return;
       const pullX = current.x - pointer.x;
@@ -166,12 +188,17 @@ export class Game extends Scene {
       const scale = pullDistance / (Math.hypot(pullX, pullY) || 1);
       const launchX = current.x + pullX * scale;
       const launchY = current.y + pullY * scale;
-      const move = system.moveMarble(launchX, launchY);
-      if (!move) return;
-      cursor.setPosition(launchX, launchY);
-      this.time.delayedCall(MOVE_DURATION, () => cursor.setPosition(-9999, 0));
       if (this.settings.mode === "multi") {
-        this.socket?.emit("game:move", { roomId: this.settings.roomId, turnId: this.settings.turnId, x: move.x, y: move.y });
+        const requestId = `${this.settings.gameId}-${this.settings.turnId}-${++this.requestSequence}`;
+        this.socket?.emit("game:move", {
+          roomId: this.settings.roomId, gameId: this.settings.gameId, turnId: this.settings.turnId,
+          requestId, x: launchX, y: launchY,
+        }, (result: { ok: boolean }) => { if (!result?.ok) this.cancelAim(aimLine, pullLine, trajectory, powerText); });
+      } else {
+        const move = system.moveMarble(launchX, launchY);
+        if (!move) return;
+        cursor.setPosition(launchX, launchY);
+        this.time.delayedCall(MOVE_DURATION, () => cursor.setPosition(-9999, 0));
       }
     };
     this.input.on("pointerup", shoot);
@@ -182,6 +209,9 @@ export class Game extends Scene {
       this.input.off("pointerup");
       this.input.off("pointerupoutside");
     });
+    const onBlur = () => this.cancelAim(aimLine, pullLine, trajectory, powerText);
+    window.addEventListener("blur", onBlur);
+    this.cleanup.push(() => window.removeEventListener("blur", onBlur));
     this.events.once("shutdown", () => this.cleanupScene());
     this.events.once("destroy", () => this.cleanupScene());
     const back = document.createElement("button");
@@ -196,8 +226,33 @@ export class Game extends Scene {
 
   private cleanupScene() {
     this.dragging = false;
+    if (this.abortTimer !== undefined) window.clearTimeout(this.abortTimer);
     this.cleanup.splice(0).forEach((dispose) => dispose());
     this.system?.destroy();
+  }
+
+  private cleanupAim(
+    aimLine: Phaser.GameObjects.Line,
+    pullLine: Phaser.GameObjects.Line,
+    trajectory: Phaser.GameObjects.Graphics,
+    powerText: Phaser.GameObjects.Text
+  ) {
+    this.dragging = false;
+    aimLine.setVisible(false);
+    pullLine.setVisible(false);
+    trajectory.clear().setVisible(false);
+    powerText.setText("힘: 0%");
+  }
+
+  private cancelAim(
+    aimLine: Phaser.GameObjects.Line,
+    pullLine: Phaser.GameObjects.Line,
+    trajectory: Phaser.GameObjects.Graphics,
+    powerText: Phaser.GameObjects.Text
+  ) {
+    this.aimTurn = -1;
+    this.aimTurnId = 0;
+    this.cleanupAim(aimLine, pullLine, trajectory, powerText);
   }
 
   private render(
@@ -223,7 +278,7 @@ export class Game extends Scene {
       args.holes.forEach((hole) => this.add.image(hole.x, hole.y, "hole"));
     }
 
-    const current = args.marbles[args.turn];
+    const current = args.marbles.find((marble) => marble.id === args.turn);
     const currentPower = current
       ? Math.min(100, Math.round(Math.hypot(this.input.activePointer.x - current.x, this.input.activePointer.y - current.y) / 2))
       : 0;
@@ -241,8 +296,8 @@ export class Game extends Scene {
       image.setPosition(marble.x, marble.y).setTexture(marble.lion ? "marble_red" : "marble_green");
       image.setAlpha(marble.alive ? 1 : 0);
       label.setPosition(marble.x, marble.y - 18).setText(`${marble.name} · ${marble.score}`);
-      label.setAlpha(marble.alive ? (i === args.turn ? 1 : 0.65) : 0);
-      if (i === args.turn && marble.alive && args.state !== "finished") {
+      label.setAlpha(marble.alive ? (marble.id === args.turn ? 1 : 0.65) : 0);
+      if (marble.id === args.turn && marble.alive && args.state !== "finished") {
         const hole = args.holes[marble.hole];
         if (hole) {
           guideLine.setTo(marble.x, marble.y, hole.x, hole.y).setAlpha(1);
@@ -252,14 +307,13 @@ export class Game extends Scene {
       }
     });
 
-    if (args.winner) {
+    if (args.winner && !this.children.getByName("scoreboard")) {
       this.input.once("pointerdown", () => this.showScoreboard(args.marbles));
     }
   }
 
   private showScoreboard(marbles: Marble[]) {
     const board = marbles
-      .filter((marble) => marble.alive || marble.score > 0)
       .sort((a, b) => b.score - a.score)
       .map((marble, index) => `${index + 1}. ${marble.name}  ${marble.score}점`)
       .join("\n");
@@ -269,6 +323,6 @@ export class Game extends Scene {
       align: "center",
       backgroundColor: "#fffbeeee",
       padding: { x: 24, y: 20 },
-    }).setOrigin(0.5).setDepth(20);
+    }).setName("scoreboard").setOrigin(0.5).setDepth(20);
   }
 }
