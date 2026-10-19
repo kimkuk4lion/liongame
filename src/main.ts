@@ -81,7 +81,7 @@ function showMultiplayer(root: HTMLElement) {
           <button id="create">방 만들기</button>
           <button id="join">방 참여</button>
         </div>
-        <input id="room" maxlength="8" placeholder="방 코드 (참여 시)">
+        <input id="room" maxlength="4" inputmode="numeric" pattern="[0-9]{4}" placeholder="방 코드 (참여 시)">
       </section>
       <p id="lobby-status" class="status">Socket.IO 서버에 연결 중...</p>
     </main>`;
