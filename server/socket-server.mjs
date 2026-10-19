@@ -14,10 +14,15 @@ const MAX_MOVE_DISTANCE = 200;
 const MARBLE_RADIUS = 12.5;
 const HOLE_RADIUS = 17.5;
 const MIN_COORDINATE = 10;
+const PUSH_DISTANCE_BASE = 50;
+const PUSH_DISTANCE_PER_FORCE = 1.8;
 const HOLES = [{ x: 300, y: 950 }, { x: 300, y: 700 }, { x: 300, y: 400 }, { x: 500, y: 400 }, { x: 100, y: 400 }, { x: 300, y: 150 }];
 
 const validName = (value) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= 10;
-const roomIdOf = (value) => typeof value === "string" ? value.trim().toUpperCase() : "";
+const roomIdOf = (value) => {
+  const roomId = typeof value === "string" ? value.trim() : "";
+  return /^\d{4}$/.test(roomId) ? roomId : "";
+};
 const finiteCoordinate = (value, min, max) => Number.isFinite(value) && value >= min && value <= max;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 function segmentDistance(startX, startY, endX, endY, pointX, pointY) {
@@ -137,7 +142,7 @@ io.on("connection", (socket) => {
     const maxPlayers = Number(payload?.maxPlayers);
     if (!validName(payload?.name) || !Number.isInteger(maxPlayers) || maxPlayers < 2 || maxPlayers > 4) return emitError(socket, "닉네임은 1~10자, 인원수는 2~4명이어야 합니다.", ack);
     let roomId;
-    do roomId = Math.random().toString(36).slice(2, 8).toUpperCase(); while (rooms.has(roomId));
+    do roomId = String(Math.floor(Math.random() * 10_000)).padStart(4, "0"); while (rooms.has(roomId));
     const player = { id: 0, socketId: socket.id, name: payload.name.trim() };
     const room = { hostId: 0, maxPlayers, status: "waiting", players: [player], nextId: 1, gameId: 0, version: 0, turnId: 0, turnPlayerId: 0, deadline: 0, moving: false, lastRequestId: "", state: { marbles: [] } };
     rooms.set(roomId, room);
@@ -210,7 +215,7 @@ io.on("connection", (socket) => {
       } else if (other.lion) {
         current.alive = false;
       } else {
-        current.score += other.inHole ? 3 : 1;
+        current.score += 1;
         other.inHole = false;
       }
       if (other.alive && !current.lion && !other.lion) {
@@ -220,7 +225,7 @@ io.on("connection", (socket) => {
         const shotDistance = Math.hypot(x - startX, y - startY) || 1;
         const directionX = collisionDistance > 0 ? collisionX / collisionDistance : (x - startX) / shotDistance;
         const directionY = collisionDistance > 0 ? collisionY / collisionDistance : (y - startY) / shotDistance;
-        const pushDistance = 80 + force * 3;
+        const pushDistance = PUSH_DISTANCE_BASE + force * PUSH_DISTANCE_PER_FORCE;
         other.x = clamp(other.x + directionX * pushDistance, MIN_COORDINATE, WIDTH - MIN_COORDINATE);
         other.y = clamp(other.y + directionY * pushDistance, MIN_COORDINATE, HEIGHT - MIN_COORDINATE);
       }

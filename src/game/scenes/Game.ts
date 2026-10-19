@@ -1,6 +1,6 @@
 import type { Socket } from "socket.io-client";
 import { Scene } from "phaser";
-import { MOVE_DURATION, MOVE_RANDOM } from "../../constants";
+import { AIM_SENSITIVITY, MOVE_DURATION, MOVE_RANDOM } from "../../constants";
 import type { GameSettings } from "../../main";
 import { Marble, RenderArgs, System } from "../../system";
 
@@ -55,6 +55,19 @@ export class Game extends Scene {
       backgroundColor: "#ffffffcc",
       padding: { x: 8, y: 5 },
     }).setDepth(10);
+    const backButton = this.add.container(516, 38).setDepth(20);
+    const backBackground = this.add.rectangle(0, 0, 140, 46, 0xf5c778, 1)
+      .setStrokeStyle(2, 0xd8934d)
+      .setInteractive({ useHandCursor: true });
+    const backLabel = this.add.text(0, 0, "메인으로", {
+      color: "#2b160d",
+      fontSize: 18,
+      fontStyle: "bold",
+    }).setOrigin(0.5);
+    backButton.add([backBackground, backLabel]);
+    backBackground.on("pointerdown", () => {
+      if (window.confirm("게임을 나가면 경기가 중단됩니다. 메인으로 이동할까요?")) this.settings.onExit?.();
+    });
     const guideLine = this.add.line(0, 0, 0, 0, 0, 0, 0xff0000, 0.3)
       .setDepth(3).setLineWidth(20, 1);
     const aimLine = this.add.line(0, 0, 0, 0, 0, 0x1d70ff, 0.8)
@@ -120,7 +133,7 @@ export class Game extends Scene {
       if (!current) return;
       const pullX = current.x - pointer.x;
       const pullY = current.y - pointer.y;
-      const pullDistance = Math.min(200, Math.hypot(pullX, pullY));
+      const pullDistance = Math.min(200, Math.hypot(pullX, pullY) * AIM_SENSITIVITY);
       const scale = pullDistance / (Math.hypot(pullX, pullY) || 1);
       const launchX = current.x + pullX * scale;
       const launchY = current.y + pullY * scale;
@@ -180,7 +193,7 @@ export class Game extends Scene {
       if (!current) return;
       const pullX = current.x - pointer.x;
       const pullY = current.y - pointer.y;
-      const pullDistance = Math.min(200, Math.hypot(pullX, pullY));
+      const pullDistance = Math.min(200, Math.hypot(pullX, pullY) * AIM_SENSITIVITY);
       if (pullDistance < 8) {
         powerText.setText("힘: 0%");
         return;
@@ -214,14 +227,6 @@ export class Game extends Scene {
     this.cleanup.push(() => window.removeEventListener("blur", onBlur));
     this.events.once("shutdown", () => this.cleanupScene());
     this.events.once("destroy", () => this.cleanupScene());
-    const back = document.createElement("button");
-    back.id = "game-back";
-    back.textContent = "메인으로";
-    back.addEventListener("click", () => {
-      if (window.confirm("게임을 나가면 경기가 중단됩니다. 메인으로 이동할까요?")) this.settings.onExit?.();
-    });
-    document.getElementById("game-container")?.append(back);
-    this.cleanup.push(() => back.remove());
   }
 
   private cleanupScene() {
@@ -287,7 +292,7 @@ export class Game extends Scene {
       args.winner
         ? `${args.winner.name}님이 우승하였습니다!\n클릭하면 스코어보드를 확인합니다.`
         : current
-          ? `${current.name}님의 차례  ·  ${args.remainingSeconds}초\n구멍 +2  구슬 +1  구멍 밖으로 +3  사자 처치 +2`
+          ? `${current.name}님의 차례 · ${args.remainingSeconds}초\n구멍 +2 구슬 +1 사자 처치 +2`
           : "게임이 종료되었습니다."
     );
     args.marbles.forEach((marble, i) => {
