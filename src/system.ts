@@ -264,7 +264,7 @@ export class System {
       } else if (other.lion) {
         marble.alive = false;
       } else {
-        marble.score += other.inHole ? 3 : 1;
+        marble.score += 1;
         other.inHole = false;
       }
       this.checkWinner();

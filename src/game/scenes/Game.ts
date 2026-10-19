@@ -287,7 +287,7 @@ export class Game extends Scene {
       args.winner
         ? `${args.winner.name}님이 우승하였습니다!\n클릭하면 스코어보드를 확인합니다.`
         : current
-          ? `${current.name}님의 차례  ·  ${args.remainingSeconds}초\n구멍 +2  구슬 +1  구멍 밖으로 +3  사자 처치 +2`
+          ? `${current.name}님의 차례 · ${args.remainingSeconds}초\n구멍 +2 구슬 +1 사자 처치 +2`
           : "게임이 종료되었습니다."
     );
     args.marbles.forEach((marble, i) => {

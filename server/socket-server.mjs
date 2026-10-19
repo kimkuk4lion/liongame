@@ -210,7 +210,7 @@ io.on("connection", (socket) => {
       } else if (other.lion) {
         current.alive = false;
       } else {
-        current.score += other.inHole ? 3 : 1;
+        current.score += 1;
         other.inHole = false;
       }
       if (other.alive && !current.lion && !other.lion) {
