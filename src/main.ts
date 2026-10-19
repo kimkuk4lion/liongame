@@ -55,7 +55,6 @@ function showLobby() {
       <h1>사자구슬게임</h1>
       <p class="subtitle">10초 안에 조준하고 상대를 밀어내세요!</p>
       <section class="panel">
-        <label>닉네임 <input id="nickname" maxlength="10" placeholder="플레이어" value="${escapeHtml(nickname)}"></label>
         <div class="button-row">
           <button id="practice">연습모드 (구슬 4개)</button>
           <button id="multi">멀티플레이</button>
@@ -64,7 +63,6 @@ function showLobby() {
       <p id="lobby-status" class="status"></p>
     </main>`;
   root.querySelector("#practice")?.addEventListener("click", () => {
-    nickname = inputValue(root, "#nickname", nickname);
     start({ mode: "practice", playerCount: 4, names: ["연습 1", "연습 2", "연습 3", "연습 4"], serverUrl: SERVER_URL });
   });
   root.querySelector("#multi")?.addEventListener("click", () => showMultiplayer(root));
