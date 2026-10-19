@@ -55,6 +55,19 @@ export class Game extends Scene {
       backgroundColor: "#ffffffcc",
       padding: { x: 8, y: 5 },
     }).setDepth(10);
+    const backButton = this.add.container(516, 38).setDepth(20);
+    const backBackground = this.add.rectangle(0, 0, 140, 46, 0xf5c778, 1)
+      .setStrokeStyle(2, 0xd8934d)
+      .setInteractive({ useHandCursor: true });
+    const backLabel = this.add.text(0, 0, "메인으로", {
+      color: "#2b160d",
+      fontSize: 18,
+      fontStyle: "bold",
+    }).setOrigin(0.5);
+    backButton.add([backBackground, backLabel]);
+    backBackground.on("pointerdown", () => {
+      if (window.confirm("게임을 나가면 경기가 중단됩니다. 메인으로 이동할까요?")) this.settings.onExit?.();
+    });
     const guideLine = this.add.line(0, 0, 0, 0, 0, 0, 0xff0000, 0.3)
       .setDepth(3).setLineWidth(20, 1);
     const aimLine = this.add.line(0, 0, 0, 0, 0, 0x1d70ff, 0.8)
@@ -214,14 +227,6 @@ export class Game extends Scene {
     this.cleanup.push(() => window.removeEventListener("blur", onBlur));
     this.events.once("shutdown", () => this.cleanupScene());
     this.events.once("destroy", () => this.cleanupScene());
-    const back = document.createElement("button");
-    back.id = "game-back";
-    back.textContent = "메인으로";
-    back.addEventListener("click", () => {
-      if (window.confirm("게임을 나가면 경기가 중단됩니다. 메인으로 이동할까요?")) this.settings.onExit?.();
-    });
-    document.getElementById("game-container")?.append(back);
-    this.cleanup.push(() => back.remove());
   }
 
   private cleanupScene() {
