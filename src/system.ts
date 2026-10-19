@@ -1,4 +1,10 @@
-import { GAME_HEIGHT, GAME_WIDTH, MOVE_RANDOM } from "./constants";
+import {
+  GAME_HEIGHT,
+  GAME_WIDTH,
+  MOVE_RANDOM,
+  PUSH_DISTANCE_BASE,
+  PUSH_DISTANCE_PER_FORCE,
+} from "./constants";
 
 export type Hole = { id: number; x: number; y: number };
 
@@ -255,7 +261,7 @@ export class System {
       const collisionLength = Math.hypot(collisionX, collisionY);
       const directionX = collisionLength > 0 ? collisionX / collisionLength : shotX / shotLength;
       const directionY = collisionLength > 0 ? collisionY / collisionLength : shotY / shotLength;
-      const pushDistance = 80 + force * 3;
+      const pushDistance = PUSH_DISTANCE_BASE + force * PUSH_DISTANCE_PER_FORCE;
       let targetX = clamp(other.x + directionX * pushDistance, 10, GAME_WIDTH - 10);
       let targetY = clamp(other.y + directionY * pushDistance, 10, GAME_HEIGHT - 10);
       if (marble.lion) {

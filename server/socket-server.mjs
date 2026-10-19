@@ -14,6 +14,8 @@ const MAX_MOVE_DISTANCE = 200;
 const MARBLE_RADIUS = 12.5;
 const HOLE_RADIUS = 17.5;
 const MIN_COORDINATE = 10;
+const PUSH_DISTANCE_BASE = 50;
+const PUSH_DISTANCE_PER_FORCE = 1.8;
 const HOLES = [{ x: 300, y: 950 }, { x: 300, y: 700 }, { x: 300, y: 400 }, { x: 500, y: 400 }, { x: 100, y: 400 }, { x: 300, y: 150 }];
 
 const validName = (value) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= 10;
@@ -220,7 +222,7 @@ io.on("connection", (socket) => {
         const shotDistance = Math.hypot(x - startX, y - startY) || 1;
         const directionX = collisionDistance > 0 ? collisionX / collisionDistance : (x - startX) / shotDistance;
         const directionY = collisionDistance > 0 ? collisionY / collisionDistance : (y - startY) / shotDistance;
-        const pushDistance = 80 + force * 3;
+        const pushDistance = PUSH_DISTANCE_BASE + force * PUSH_DISTANCE_PER_FORCE;
         other.x = clamp(other.x + directionX * pushDistance, MIN_COORDINATE, WIDTH - MIN_COORDINATE);
         other.y = clamp(other.y + directionY * pushDistance, MIN_COORDINATE, HEIGHT - MIN_COORDINATE);
       }
