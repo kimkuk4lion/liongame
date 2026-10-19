@@ -85,7 +85,7 @@ export class Game extends Scene {
       system.applyServerState(this.settings.initialState as Parameters<System["applyServerState"]>[0]);
     }
 
-    const onState = (state: { version: number; gameId: number; turnId: number; turnPlayerId: number; deadline: number; state: "wait_move" | "moving" | "finished"; marbles: Marble[]; winnerId?: number }) => {
+    const onState = (state: { version: number; gameId: number; turnId: number; turnPlayerId: number; deadline: number; pausedRemainingMs?: number; state: "wait_move" | "moving" | "paused" | "finished"; marbles: Marble[]; winnerId?: number }) => {
       if (state.gameId !== this.settings.gameId || state.version <= this.latestVersion) return;
       this.latestVersion = state.version;
       this.settings.turnId = state.turnId;
@@ -114,6 +114,36 @@ export class Game extends Scene {
       };
       this.socket.on("game:turn", onTurn);
       this.cleanup.push(() => this.socket?.off("game:turn", onTurn));
+      const onDisconnected = (data: { playerId: number; graceMs: number }) => {
+        const player = system.getSnapshot().marbles.find((marble) => marble.id === data.playerId);
+        description.setText(`${player?.name ?? `플레이어 ${data.playerId + 1}`}의 연결이 끊겼습니다. 재접속을 기다리는 중입니다. (30초)`);
+        this.cancelAim(aimLine, pullLine, trajectory, powerText);
+      };
+      const onReconnected = (data: { playerId: number }) => {
+        const player = system.getSnapshot().marbles.find((marble) => marble.id === data.playerId);
+        description.setText(`${player?.name ?? `플레이어 ${data.playerId + 1}`}가 다시 접속했습니다. 게임을 재개합니다.`);
+      };
+      const onEliminated = (data: { playerId: number; reason: string }) => {
+        const player = system.getSnapshot().marbles.find((marble) => marble.id === data.playerId);
+        description.setText(`${player?.name ?? `플레이어 ${data.playerId + 1}`}가 복귀하지 않아 게임에서 탈락했습니다.`);
+      };
+      const onPaused = () => {
+        this.cancelAim(aimLine, pullLine, trajectory, powerText);
+        description.setText("연결이 끊긴 플레이어를 기다리는 중입니다. 게임이 일시정지되었습니다.");
+      };
+      const onResumed = () => description.setText("플레이어가 다시 접속했습니다. 게임을 재개합니다.");
+      this.socket.on("player:disconnected", onDisconnected);
+      this.socket.on("player:reconnected", onReconnected);
+      this.socket.on("player:eliminated", onEliminated);
+      this.socket.on("game:paused", onPaused);
+      this.socket.on("game:resumed", onResumed);
+      this.cleanup.push(
+        () => this.socket?.off("player:disconnected", onDisconnected),
+        () => this.socket?.off("player:reconnected", onReconnected),
+        () => this.socket?.off("player:eliminated", onEliminated),
+        () => this.socket?.off("game:paused", onPaused),
+        () => this.socket?.off("game:resumed", onResumed),
+      );
       const onAborted = (data: { message: string }) => {
         if (this.aborted) return;
         this.aborted = true;
@@ -291,7 +321,9 @@ export class Game extends Scene {
     description.setText(
       args.winner
         ? `${args.winner.name}님이 우승하였습니다!\n클릭하면 스코어보드를 확인합니다.`
-        : current
+        : args.state === "paused"
+          ? "연결이 끊긴 플레이어를 기다리는 중입니다."
+          : current
           ? `${current.name}님의 차례 · ${args.remainingSeconds}초\n구멍 +2 구슬 +1 사자 처치 +2`
           : "게임이 종료되었습니다."
     );
