@@ -1,6 +1,6 @@
 import type { Socket } from "socket.io-client";
 import { Scene } from "phaser";
-import { MOVE_DURATION, MOVE_RANDOM } from "../../constants";
+import { AIM_SENSITIVITY, MOVE_DURATION, MOVE_RANDOM } from "../../constants";
 import type { GameSettings } from "../../main";
 import { Marble, RenderArgs, System } from "../../system";
 
@@ -133,7 +133,7 @@ export class Game extends Scene {
       if (!current) return;
       const pullX = current.x - pointer.x;
       const pullY = current.y - pointer.y;
-      const pullDistance = Math.min(200, Math.hypot(pullX, pullY));
+      const pullDistance = Math.min(200, Math.hypot(pullX, pullY) * AIM_SENSITIVITY);
       const scale = pullDistance / (Math.hypot(pullX, pullY) || 1);
       const launchX = current.x + pullX * scale;
       const launchY = current.y + pullY * scale;
@@ -193,7 +193,7 @@ export class Game extends Scene {
       if (!current) return;
       const pullX = current.x - pointer.x;
       const pullY = current.y - pointer.y;
-      const pullDistance = Math.min(200, Math.hypot(pullX, pullY));
+      const pullDistance = Math.min(200, Math.hypot(pullX, pullY) * AIM_SENSITIVITY);
       if (pullDistance < 8) {
         powerText.setText("힘: 0%");
         return;
