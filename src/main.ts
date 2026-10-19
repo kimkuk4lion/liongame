@@ -12,6 +12,7 @@ export type GameSettings = {
   initialState?: unknown;
   serverUrl: string;
   playerId?: number;
+  reconnectToken?: string;
   turnId?: number;
   socket?: Socket;
   onExit?: () => void;
@@ -24,7 +25,7 @@ let socket: Socket | undefined;
 let game: PhaserGame | undefined;
 let screenGeneration = 0;
 let screen: "main" | "waiting" | "playing" = "main";
-let roomSession: { roomId: string; playerId: number } | undefined;
+let roomSession: { roomId: string; playerId: number; token?: string } | undefined;
 let navigationTimer: number | undefined;
 
 function clearNavigationTimer() {
@@ -86,24 +87,50 @@ function showMultiplayer(root: HTMLElement) {
       <p id="lobby-status" class="status">Socket.IO 서버에 연결 중...</p>
     </main>`;
   const generation = screenGeneration;
-  socket = io(SERVER_URL, { autoConnect: false });
+  socket = io(SERVER_URL, {
+    autoConnect: false,
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 1000,
+    reconnectionDelayMax: 5000,
+  });
   const currentSocket = socket;
-  currentSocket.connect();
-  currentSocket.once("disconnect", () => { if (generation === screenGeneration && screen === "waiting") status.textContent = "서버 연결이 끊겼습니다."; });
   const status = root.querySelector("#lobby-status") as HTMLElement;
   let roomCode = "";
   let requestPending = false;
+  const storedSession = readSession();
   const cancel = document.createElement("button");
   cancel.id = "main-cancel";
   cancel.textContent = "메인으로";
   cancel.addEventListener("click", showLobby);
   root.querySelector(".panel")?.append(cancel);
-  currentSocket.on("connect", () => { status.textContent = "방을 만들거나 방 코드를 입력하세요."; });
+  currentSocket.on("connect", () => {
+    if (storedSession && !roomSession) {
+      roomCode = storedSession.roomId;
+      roomSession = { roomId: storedSession.roomId, playerId: storedSession.playerId, token: storedSession.reconnectToken };
+      currentSocket.emit("room:rejoin", storedSession, (result: { ok: boolean; error?: string }) => {
+        if (!result?.ok) {
+          roomSession = undefined;
+          clearSession();
+          status.textContent = result?.error || "재접속 세션이 만료되었습니다.";
+        }
+      });
+    } else {
+      status.textContent = "방을 만들거나 방 코드를 입력하세요.";
+    }
+  });
+  currentSocket.on("disconnect", (reason) => {
+    if (generation === screenGeneration && screen === "waiting") status.textContent = `서버 연결이 끊겼습니다. (${reason}) 재접속 중...`;
+  });
+  currentSocket.on("reconnect_attempt", () => {
+    if (generation === screenGeneration && screen === "waiting") status.textContent = "서버에 재접속 중...";
+  });
   currentSocket.on("connect_error", () => { status.textContent = "멀티플레이 서버에 연결할 수 없습니다. 서버를 먼저 실행하세요."; });
-  const onCreated = (room: { roomId: string; count: number; playerId: number }) => {
+  const onCreated = (room: { roomId: string; count: number; playerId: number; reconnectToken: string }) => {
     if (generation !== screenGeneration) return;
     roomCode = room.roomId;
-    roomSession = { roomId: room.roomId, playerId: room.playerId };
+    roomSession = { roomId: room.roomId, playerId: room.playerId, token: room.reconnectToken };
+    saveSession(room.roomId, room.playerId, room.reconnectToken);
     status.textContent = `방 코드: ${roomCode} · ${room.count}명 입장 대기 중`;
   };
   const onRoomUpdate = (room: { roomId: string; count: number; maxPlayers: number; hostId: number; players: { id: number; name: string; isHost: boolean }[]; status: string }) => {
@@ -139,6 +166,7 @@ function showMultiplayer(root: HTMLElement) {
       roomId: data.roomId,
       gameId: data.gameId,
       playerId: data.playerId,
+      reconnectToken: roomSession?.token,
       turnId: data.turnId,
       initialState: data.state,
       serverUrl: SERVER_URL,
@@ -147,6 +175,10 @@ function showMultiplayer(root: HTMLElement) {
         if (generation === screenGeneration && screen === "playing") {
           showWaiting(root, currentSocket, roomCode, generation);
         }
+      },
+      onExit: () => {
+        clearSession();
+        currentSocket.emit("room:leave", { roomId: roomCode }, () => showLobby());
       },
     });
   };
@@ -161,11 +193,12 @@ function showMultiplayer(root: HTMLElement) {
     currentSocket.off("game:start", onStart);
     currentSocket.off("game:error", onError);
   };
+  currentSocket.connect();
   root.querySelector("#create")?.addEventListener("click", () => {
     if (!currentSocket.connected || requestPending) return;
     nickname = inputValue(root, "#nickname", nickname);
     requestPending = true; setLobbyButtons(root, true);
-    currentSocket.emit("room:create", { name: nickname, maxPlayers: Number(inputValue(root, "#count", "2")) }, (result: { ok: boolean; error?: string }) => {
+    currentSocket.emit("room:create", { name: nickname, maxPlayers: Number(inputValue(root, "#count", "2")) }, (result: { ok: boolean; error?: string; playerId?: number; reconnectToken?: string }) => {
       if (!result?.ok) onError(result?.error || "방 생성에 실패했습니다.");
     });
   });
@@ -174,8 +207,11 @@ function showMultiplayer(root: HTMLElement) {
     nickname = inputValue(root, "#nickname", nickname);
     roomCode = inputValue(root, "#room", "").toUpperCase();
     requestPending = true; setLobbyButtons(root, true);
-    currentSocket.emit("room:join", { roomId: roomCode, name: nickname }, (result: { ok: boolean; playerId?: number; error?: string }) => {
-      if (result?.ok && result.playerId !== undefined) roomSession = { roomId: roomCode, playerId: result.playerId };
+    currentSocket.emit("room:join", { roomId: roomCode, name: nickname }, (result: { ok: boolean; playerId?: number; reconnectToken?: string; error?: string }) => {
+      if (result?.ok && result.playerId !== undefined && result.reconnectToken) {
+        roomSession = { roomId: roomCode, playerId: result.playerId, token: result.reconnectToken };
+        saveSession(roomCode, result.playerId, result.reconnectToken);
+      }
       else onError(result?.error || "방 참여에 실패했습니다.");
     });
   });
@@ -199,6 +235,7 @@ function addStartButton(root: HTMLElement, socket: Socket, roomId: () => string)
     leave.id = "leave-room";
     leave.textContent = "방 나가기";
     leave.addEventListener("click", () => {
+      clearSession();
       socket.emit("room:leave", {}, () => showLobby());
       navigationTimer = window.setTimeout(() => {
         navigationTimer = undefined;
@@ -214,7 +251,10 @@ function showWaiting(root: HTMLElement, socket: Socket, roomId: string, generati
   if (generation !== screenGeneration) return;
   screen = "waiting";
   root.innerHTML = `<main class="lobby"><h1>대기방</h1><section class="panel"><p id="lobby-status" class="status">방 코드: ${escapeHtml(roomId)}</p><button id="waiting-leave">방 나가기</button></section></main>`;
+  let disposed = false;
   root.querySelector("#waiting-leave")?.addEventListener("click", () => {
+    dispose();
+    clearSession();
     socket.emit("room:leave", { roomId }, () => showLobby());
     navigationTimer = window.setTimeout(() => {
       navigationTimer = undefined;
@@ -230,12 +270,21 @@ function showWaiting(root: HTMLElement, socket: Socket, roomId: string, generati
   };
   const onStart = (data: { roomId: string; gameId: number; playerId: number; turnId: number; players: { id: number; name: string }[]; state: unknown }) => {
     if (generation !== screenGeneration) return;
+    dispose();
     screen = "playing";
     start({ mode: "multi", playerCount: data.players.length, names: data.players.map((player) => player.name), playerIds: data.players.map((player) => player.id), roomId: data.roomId, gameId: data.gameId, playerId: data.playerId, turnId: data.turnId, initialState: data.state, serverUrl: SERVER_URL, socket, onAbort: () => showWaiting(root, socket, roomId, generation) });
   };
+  const onError = (message: string) => { if (generation === screenGeneration) status.textContent = message; };
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    socket.off("room:update", onUpdate);
+    socket.off("game:start", onStart);
+    socket.off("game:error", onError);
+  };
   socket.on("room:update", onUpdate);
   socket.on("game:start", onStart);
-  socket.on("game:error", (message: string) => { if (generation === screenGeneration) status.textContent = message; });
+  socket.on("game:error", onError);
 }
 
 function setLobbyButtons(root: HTMLElement, disabled: boolean) {
@@ -244,6 +293,25 @@ function setLobbyButtons(root: HTMLElement, disabled: boolean) {
 
 function inputValue(root: HTMLElement, selector: string, fallback: string) {
   return (root.querySelector(selector) as HTMLInputElement | HTMLSelectElement)?.value || fallback;
+}
+
+function saveSession(roomId: string, playerId: number, token: string) {
+  sessionStorage.setItem("liongame-session", JSON.stringify({ roomId, playerId, reconnectToken: token }));
+}
+
+function readSession(): { roomId: string; playerId: number; reconnectToken: string } | undefined {
+  try {
+    const value = JSON.parse(sessionStorage.getItem("liongame-session") || "null");
+    return value && typeof value.roomId === "string" && typeof value.playerId === "number" && typeof value.reconnectToken === "string"
+      ? value
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function clearSession() {
+  sessionStorage.removeItem("liongame-session");
 }
 
 function start(settings: GameSettings) {

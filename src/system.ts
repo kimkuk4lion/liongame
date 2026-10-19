@@ -18,9 +18,11 @@ export type Marble = {
   alive: boolean;
   inHole: boolean;
   score: number;
+  eliminated?: boolean;
+  eliminationReason?: string;
 };
 
-export type GameState = "wait_move" | "moving" | "finished";
+export type GameState = "wait_move" | "moving" | "paused" | "finished";
 
 export type RenderArgs = {
   turn: number;
@@ -168,6 +170,7 @@ export class System {
     turnId: number;
     turnPlayerId: number;
     deadline: number;
+    pausedRemainingMs?: number;
     state: GameState;
     marbles: Marble[];
     winnerId?: number;
@@ -189,8 +192,11 @@ export class System {
     this.turn = state.turnPlayerId;
     this.state = state.state;
     this.winner = state.winnerId === undefined ? undefined : this.marbles[this.indexById.get(state.winnerId) ?? -1];
-    this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - Math.max(0, state.deadline - Date.now()));
-    this.remainingSeconds = Math.ceil(Math.max(0, state.deadline - Date.now()) / 1000);
+    const remainingMs = state.state === "paused"
+      ? state.pausedRemainingMs ?? 0
+      : Math.max(0, state.deadline - Date.now());
+    this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - remainingMs);
+    this.remainingSeconds = Math.ceil(remainingMs / 1000);
     this.lastRenderedSeconds = this.remainingSeconds;
     const token = ++this.serverAnimationToken;
     const start = performance.now();
