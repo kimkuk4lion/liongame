@@ -1,0 +1,79 @@
+
+name: Deploy Liongame
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: liongame-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build Vite
+        run: npm run build
+
+      - name: Setup SSH
+        env:
+          SSH_KEY: ${{ secrets.SSH_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.SSH_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Deploy
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          SSH_CMD="ssh -i $HOME/.ssh/deploy_key -o StrictHostKeyChecking=yes"
+          TARGET="$SSH_USER@$SSH_HOST"
+          DEST="/var/www/liongame"
+
+          rsync -az --delete -e "$SSH_CMD" \
+            docs/ "$TARGET:$DEST/docs/"
+
+          rsync -az --delete -e "$SSH_CMD" \
+            server/ "$TARGET:$DEST/server/"
+
+          rsync -az -e "$SSH_CMD" \
+            package.json package-lock.json \
+            "$TARGET:$DEST/"
+
+          ssh -i ~/.ssh/deploy_key \
+            -o StrictHostKeyChecking=yes \
+            "$TARGET" 'bash -se' <<'EOF'
+          set -e
+          cd /var/www/liongame
+          npm ci --omit=dev
+          pm2 restart liongame-server --update-env
+          pm2 save
+          EOF
