@@ -120,12 +120,12 @@ function advanceTurn(roomId, room) {
   broadcastState(roomId, room);
 }
 
-function finishGame(roomId, room, winnerId) {
+function finishGame(roomId, room) {
   if (room.status === "finished") return;
   room.status = "finished";
   room.paused = false;
   room.moving = false;
-  room.state.winnerId = winnerId;
+  room.state.winnerId = [...room.state.marbles].sort((a, b) => b.score - a.score)[0]?.id;
   room.deadline = 0;
   room.players.forEach((player) => {
     if (player.graceTimer) clearTimeout(player.graceTimer);
@@ -169,7 +169,7 @@ function eliminatePlayer(roomId, room, player, reason) {
     advanceTurn(roomId, room);
   }
   const alive = room.state.marbles.filter((marble) => marble.alive);
-  if (room.status === "playing" && alive.length <= 1) finishGame(roomId, room, alive[0]?.id);
+  if (room.status === "playing" && alive.length <= 1) finishGame(roomId, room);
   else resumeIfReady(roomId, room);
   room.version += 1;
   broadcastState(roomId, room);
@@ -384,7 +384,7 @@ io.on("connection", (socket) => {
     room.moving = false;
     const alive = room.state.marbles.filter((marble) => marble.alive);
     if (alive.length <= 1) {
-      finishGame(id, room, alive[0]?.id);
+      finishGame(id, room);
     } else if (room.status === "playing") {
       advanceTurn(id, room);
     }

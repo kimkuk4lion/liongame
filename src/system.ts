@@ -363,7 +363,7 @@ export class System {
     const alive = this.marbles.filter((marble) => marble.alive);
     const aliveLions = alive.filter((marble) => marble.lion);
     if (alive.length <= 1 || (aliveLions.length === 1 && alive.every((marble) => marble.lion))) {
-      this.winner = [...alive].sort((a, b) => b.score - a.score)[0];
+      this.winner = [...this.marbles].sort((a, b) => b.score - a.score)[0];
       this.state = "finished";
     }
   }
