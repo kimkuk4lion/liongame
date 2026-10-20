@@ -63,17 +63,35 @@ function segmentDistance(startX, startY, endX, endY, pointX, pointY) {
   return Math.hypot(pointX - closestX, pointY - closestY);
 }
 
-function publish(roomId) {
-  const room = rooms.get(roomId);
-  if (!room) return;
-  io.to(roomId).emit("room:update", {
+function firstContactOnSegment(startX, startY, endX, endY, pointX, pointY, radius) {
+  const dx = endX - startX;
+  const dy = endY - startY;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) return undefined;
+  const t = ((pointX - startX) * dx + (pointY - startY) * dy) / lengthSquared;
+  const clampedT = Math.max(0, Math.min(1, t));
+  const contactX = startX + dx * clampedT;
+  const contactY = startY + dy * clampedT;
+  const distance = Math.hypot(pointX - contactX, pointY - contactY);
+  if (distance > radius) return undefined;
+  return { t: clampedT, x: contactX, y: contactY };
+}
+
+function roomSummary(roomId, room) {
+  return {
     roomId,
     count: room.players.length,
     maxPlayers: room.maxPlayers,
     hostId: room.hostId,
     status: room.status,
     players: room.players.map(({ id, name }) => ({ id, name, isHost: id === room.hostId })),
-  });
+  };
+}
+
+function publish(roomId) {
+  const room = rooms.get(roomId);
+  if (!room) return;
+  io.to(roomId).emit("room:update", roomSummary(roomId, room));
 }
 
 function emitError(socket, message, ack) {
@@ -436,12 +454,26 @@ io.on("connection", (socket) => {
     const player = room?.players.find((candidate) => candidate.reconnectToken === token);
     if (!room || !player || player.status === "eliminated" || room.status === "finished")
       return emitError(socket, "재접속 세션이 만료되었습니다.", ack);
+    const gameStartData =
+      room.status === "playing"
+        ? {
+            roomId: id,
+            gameId: room.gameId,
+            playerId: player.id,
+            turnId: room.turnId,
+            deadline: room.deadline,
+            players: room.players.map(({ id: playerId, name }) => ({ id: playerId, name })),
+            state: snapshot(room),
+          }
+        : undefined;
     if (player.socketId === socket.id && mappedRoom === id) {
       emitAck(ack, {
         ok: true,
         playerId: player.id,
         status: room.status,
+        room: roomSummary(id, room),
         state: room.status === "playing" ? snapshot(room) : undefined,
+        gameStartData,
       });
       return;
     }
@@ -462,21 +494,15 @@ io.on("connection", (socket) => {
     io.to(id).emit("player:reconnected", { playerId: player.id });
     publish(id);
     if (room.status === "playing") {
-      socket.emit("game:start", {
-        roomId: id,
-        gameId: room.gameId,
-        playerId: player.id,
-        turnId: room.turnId,
-        deadline: room.deadline,
-        players: room.players.map(({ id: playerId, name }) => ({ id: playerId, name })),
-        state: snapshot(room),
-      });
+      socket.emit("game:start", gameStartData);
     }
     emitAck(ack, {
       ok: true,
       playerId: player.id,
       status: room.status,
+      room: roomSummary(id, room),
       state: room.status === "playing" ? snapshot(room) : undefined,
+      gameStartData,
     });
   });
 
@@ -556,13 +582,48 @@ io.on("connection", (socket) => {
     current.y = y;
     current.inHole = false;
     const force = Math.min(100, distance / 2);
+    const shotDx = x - startX;
+    const shotDy = y - startY;
+    const shotDistance = Math.hypot(shotDx, shotDy) || 1;
+    let firstMarbleHit;
     for (const other of room.state.marbles) {
-      if (
-        other.id === current.id ||
-        !other.alive ||
-        segmentDistance(startX, startY, x, y, other.x, other.y) > MARBLE_RADIUS * 2
-      )
-        continue;
+      if (other.id === current.id || !other.alive) continue;
+      const contact = firstContactOnSegment(
+        startX,
+        startY,
+        x,
+        y,
+        other.x,
+        other.y,
+        MARBLE_RADIUS * 2,
+      );
+      if (!contact) continue;
+      if (!firstMarbleHit || contact.t < firstMarbleHit.t) {
+        firstMarbleHit = { other, ...contact };
+      }
+    }
+    let firstHoleHit;
+    if (!current.lion) {
+      const hole = HOLES[current.hole];
+      if (hole) {
+        const contact = firstContactOnSegment(
+          startX,
+          startY,
+          x,
+          y,
+          hole.x,
+          hole.y,
+          HOLE_RADIUS + MARBLE_RADIUS,
+        );
+        if (contact) firstHoleHit = { hole, ...contact };
+      }
+    }
+    const marbleBeforeHole =
+      firstMarbleHit && (!firstHoleHit || firstMarbleHit.t <= firstHoleHit.t);
+    if (marbleBeforeHole) {
+      current.x = firstMarbleHit.x;
+      current.y = firstMarbleHit.y;
+      const other = firstMarbleHit.other;
       if (current.lion) {
         other.alive = false;
         current.score += 2;
@@ -571,16 +632,11 @@ io.on("connection", (socket) => {
       } else {
         current.score += 1;
         other.inHole = false;
-      }
-      if (other.alive && !current.lion && !other.lion) {
-        const collisionX = other.x - current.x;
-        const collisionY = other.y - current.y;
-        const collisionDistance = Math.hypot(collisionX, collisionY);
-        const shotDistance = Math.hypot(x - startX, y - startY) || 1;
-        const directionX =
-          collisionDistance > 0 ? collisionX / collisionDistance : (x - startX) / shotDistance;
-        const directionY =
-          collisionDistance > 0 ? collisionY / collisionDistance : (y - startY) / shotDistance;
+        const hitX = other.x - firstMarbleHit.x;
+        const hitY = other.y - firstMarbleHit.y;
+        const hitDistance = Math.hypot(hitX, hitY);
+        const directionX = hitDistance > 0 ? hitX / hitDistance : shotDx / shotDistance;
+        const directionY = hitDistance > 0 ? hitY / hitDistance : shotDy / shotDistance;
         const pushDistance = PUSH_DISTANCE_BASE + force * PUSH_DISTANCE_PER_FORCE;
         other.x = clamp(
           other.x + directionX * pushDistance,
@@ -593,20 +649,13 @@ io.on("connection", (socket) => {
           HEIGHT - MIN_COORDINATE,
         );
       }
-    }
-    if (!current.lion) {
-      const hole = HOLES[current.hole];
-      if (
-        hole &&
-        segmentDistance(startX, startY, x, y, hole.x, hole.y) <= HOLE_RADIUS + MARBLE_RADIUS
-      ) {
-        current.score += 2;
-        current.x = hole.x;
-        current.y = hole.y;
-        current.hole += 1;
-        current.inHole = current.hole < HOLES.length;
-        current.lion = current.hole >= HOLES.length;
-      }
+    } else if (firstHoleHit && current.alive) {
+      current.score += 2;
+      current.x = firstHoleHit.hole.x;
+      current.y = firstHoleHit.hole.y;
+      current.hole += 1;
+      current.inHole = current.hole < HOLES.length;
+      current.lion = current.hole >= HOLES.length;
     }
     room.version += 1;
     room.moving = false;

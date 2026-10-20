@@ -19,6 +19,25 @@ export type GameSettings = {
   onAbort?: () => void;
 };
 
+type WaitingRoomUpdate = {
+  roomId: string;
+  count: number;
+  maxPlayers: number;
+  hostId: number;
+  players?: { id: number; name: string; isHost: boolean }[];
+  status: string;
+};
+
+type GameStartPayload = {
+  roomId: string;
+  gameId: number;
+  playerId: number;
+  turnId: number;
+  deadline?: number;
+  players: { id: number; name: string }[];
+  state: unknown;
+};
+
 const SERVER_URL =
   import.meta.env.VITE_SOCKET_URL ||
   (location.protocol === "https:" ? `${location.origin}` : "http://localhost:3001");
@@ -106,6 +125,7 @@ function showMultiplayer(root: HTMLElement) {
   let roomCode = roomSession?.roomId ?? "";
   let requestPending = false;
   let leavingToMain = false;
+  let latestWaitingRoomUpdate: WaitingRoomUpdate | undefined;
   const cancel = document.createElement("button");
   cancel.id = "main-cancel";
   cancel.textContent = "메인으로";
@@ -150,6 +170,8 @@ function showMultiplayer(root: HTMLElement) {
           error?: string;
           playerId?: number;
           status?: "waiting" | "playing";
+          room?: WaitingRoomUpdate;
+          gameStartData?: GameStartPayload;
         }) => {
           if (!result?.ok) {
             roomSession = undefined;
@@ -163,9 +185,20 @@ function showMultiplayer(root: HTMLElement) {
             token: session.reconnectToken,
           };
           saveSession(session.roomId, result.playerId ?? session.playerId, session.reconnectToken);
-          if (result.status === "waiting")
-            showWaiting(root, currentSocket, session.roomId, generation, leaveAndReturnToMain);
-          else status.textContent = "진행 중 게임 상태를 복구 중입니다...";
+          if (result.status === "waiting") {
+            showWaiting(
+              root,
+              currentSocket,
+              session.roomId,
+              generation,
+              leaveAndReturnToMain,
+              result.room ?? latestWaitingRoomUpdate,
+            );
+          } else if (result.status === "playing" && result.gameStartData) {
+            onStart(result.gameStartData);
+          } else {
+            status.textContent = "진행 중 게임 상태를 복구 중입니다...";
+          }
         },
       );
     } else {
@@ -205,6 +238,7 @@ function showMultiplayer(root: HTMLElement) {
     status: string;
   }) => {
     if (generation !== screenGeneration || screen !== "waiting") return;
+    latestWaitingRoomUpdate = room;
     roomCode = room.roomId;
     status.textContent = `방 코드: ${roomCode} · ${room.count}/${room.maxPlayers}명`;
     if (!root.querySelector("#leave-room")) {
@@ -223,15 +257,7 @@ function showMultiplayer(root: HTMLElement) {
     )
       addStartButton(root, currentSocket, () => roomCode, leaveAndReturnToMain);
   };
-  const onStart = (data: {
-    roomId: string;
-    gameId: number;
-    playerId: number;
-    turnId: number;
-    deadline: number;
-    players: { id: number; name: string }[];
-    state: unknown;
-  }) => {
+  const onStart = (data: GameStartPayload) => {
     if (generation !== screenGeneration) return;
     dispose();
     screen = "playing";
@@ -341,6 +367,7 @@ function showWaiting(
   roomId: string,
   generation: number,
   onLeave: () => void,
+  initialRoom?: WaitingRoomUpdate,
 ) {
   clearNavigationTimer();
   if (generation !== screenGeneration) return;
@@ -352,13 +379,7 @@ function showWaiting(
     onLeave();
   });
   const status = root.querySelector("#lobby-status") as HTMLElement;
-  const onUpdate = (room: {
-    roomId: string;
-    count: number;
-    maxPlayers: number;
-    hostId: number;
-    status: string;
-  }) => {
+  const applyWaitingRoomUpdate = (room: WaitingRoomUpdate) => {
     if (generation !== screenGeneration || screen !== "waiting") return;
     status.textContent = `방 코드: ${room.roomId} · ${room.count}/${room.maxPlayers}명`;
     root.querySelector("#lobby-start-button")?.remove();
@@ -368,6 +389,9 @@ function showWaiting(
       room.status === "waiting"
     )
       addStartButton(root, socket, () => roomId, onLeave);
+  };
+  const onUpdate = (room: WaitingRoomUpdate) => {
+    applyWaitingRoomUpdate(room);
   };
   const onStart = (data: {
     roomId: string;
@@ -410,6 +434,7 @@ function showWaiting(
   socket.on("room:update", onUpdate);
   socket.on("game:start", onStart);
   socket.on("game:error", onError);
+  if (initialRoom) applyWaitingRoomUpdate(initialRoom);
 }
 
 function setLobbyButtons(root: HTMLElement, disabled: boolean) {
