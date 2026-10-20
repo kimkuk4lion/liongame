@@ -22,23 +22,42 @@ const HOLE_RADIUS = 17.5;
 const MIN_COORDINATE = 10;
 const PUSH_DISTANCE_BASE = 20;
 const PUSH_DISTANCE_PER_FORCE = 0.8;
-const HOLES = [{ x: 300, y: 950 }, { x: 300, y: 700 }, { x: 300, y: 400 }, { x: 500, y: 400 }, { x: 100, y: 400 }, { x: 300, y: 150 }];
+const MAX_ROOM_COUNT = 10_000;
+const ROOM_CODE_ISSUE_ATTEMPTS = 20_000;
+const MAX_REQUEST_ID_LENGTH = 64;
+const CREATE_ROOM_RATE_LIMIT = { max: 3, windowMs: 10_000 };
+const JOIN_ROOM_RATE_LIMIT = { max: 8, windowMs: 10_000 };
+const MOVE_RATE_LIMIT = { max: 20, windowMs: 2_000 };
+const HOLES = [
+  { x: 300, y: 950 },
+  { x: 300, y: 700 },
+  { x: 300, y: 400 },
+  { x: 500, y: 400 },
+  { x: 100, y: 400 },
+  { x: 300, y: 150 },
+];
 
-const validName = (value) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= 10;
-const sessionTokenOf = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : "";
+const validName = (value) =>
+  typeof value === "string" && value.trim().length > 0 && value.trim().length <= 10;
+const sessionTokenOf = (value) =>
+  typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : "";
 const roomIdOf = (value) => {
   const roomId = typeof value === "string" ? value.trim() : "";
   return /^\d{4}$/.test(roomId) ? roomId : "";
 };
-const finiteCoordinate = (value, min, max) => Number.isFinite(value) && value >= min && value <= max;
+const finiteCoordinate = (value, min, max) =>
+  Number.isFinite(value) && value >= min && value <= max;
+const validRequestId = (value) =>
+  typeof value === "string" && value.length > 0 && value.length <= MAX_REQUEST_ID_LENGTH;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 function segmentDistance(startX, startY, endX, endY, pointX, pointY) {
   const dx = endX - startX;
   const dy = endY - startY;
   const lengthSquared = dx * dx + dy * dy;
-  const projection = lengthSquared === 0
-    ? 0
-    : Math.max(0, Math.min(1, ((pointX - startX) * dx + (pointY - startY) * dy) / lengthSquared));
+  const projection =
+    lengthSquared === 0
+      ? 0
+      : Math.max(0, Math.min(1, ((pointX - startX) * dx + (pointY - startY) * dy) / lengthSquared));
   const closestX = startX + dx * projection;
   const closestY = startY + dy * projection;
   return Math.hypot(pointX - closestX, pointY - closestY);
@@ -48,7 +67,10 @@ function publish(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
   io.to(roomId).emit("room:update", {
-    roomId, count: room.players.length, maxPlayers: room.maxPlayers, hostId: room.hostId,
+    roomId,
+    count: room.players.length,
+    maxPlayers: room.maxPlayers,
+    hostId: room.hostId,
     status: room.status,
     players: room.players.map(({ id, name }) => ({ id, name, isHost: id === room.hostId })),
   });
@@ -58,6 +80,10 @@ function emitError(socket, message, ack) {
   const result = { ok: false, error: message };
   socket.emit("game:error", message);
   if (typeof ack === "function") ack(result);
+}
+
+function emitAck(ack, payload) {
+  if (typeof ack === "function") ack(payload);
 }
 
 function nextAlive(room, currentId) {
@@ -71,11 +97,22 @@ function nextAlive(room, currentId) {
 
 function snapshot(room) {
   return {
-    version: room.version, gameId: room.gameId, turnId: room.turnId, turnPlayerId: room.turnPlayerId,
+    version: room.version,
+    gameId: room.gameId,
+    turnId: room.turnId,
+    turnPlayerId: room.turnPlayerId,
     deadline: room.paused ? 0 : room.deadline,
     pausedRemainingMs: room.paused ? room.pausedRemainingMs : 0,
-    state: room.status === "finished" ? "finished" : room.paused ? "paused" : room.moving ? "moving" : "wait_move",
-    marbles: room.state.marbles, winnerId: room.state.winnerId,
+    state:
+      room.status === "finished"
+        ? "finished"
+        : room.paused
+          ? "paused"
+          : room.moving
+            ? "moving"
+            : "wait_move",
+    marbles: room.state.marbles,
+    winnerId: room.state.winnerId,
   };
 }
 
@@ -96,8 +133,15 @@ function resetGameState(room) {
   room.state = {
     winnerId: undefined,
     marbles: room.players.map((player, index) => ({
-      id: player.id, name: player.name, x: 100 + index * (room.players.length === 1 ? 0 : 400 / (room.players.length - 1)),
-      y: 1200, lion: false, hole: 0, alive: true, inHole: true, score: 0,
+      id: player.id,
+      name: player.name,
+      x: 100 + index * (room.players.length === 1 ? 0 : 400 / (room.players.length - 1)),
+      y: 1200,
+      lion: false,
+      hole: 0,
+      alive: true,
+      inHole: true,
+      score: 0,
       eliminated: false,
     })),
   };
@@ -107,10 +151,7 @@ function advanceTurn(roomId, room) {
   if (room.status !== "playing" || room.moving || room.paused) return;
   const next = nextAlive(room, room.turnPlayerId);
   if (next === undefined) {
-    room.status = "finished";
-    room.state.winnerId = [...room.state.marbles].sort((a, b) => b.score - a.score)[0]?.id;
-    room.version += 1;
-    broadcastState(roomId, room);
+    finishGame(roomId, room);
     return;
   }
   room.turnPlayerId = next;
@@ -121,7 +162,7 @@ function advanceTurn(roomId, room) {
 }
 
 function finishGame(roomId, room) {
-  if (room.status === "finished") return;
+  if (room.status === "finished") return false;
   room.status = "finished";
   room.paused = false;
   room.moving = false;
@@ -134,13 +175,31 @@ function finishGame(roomId, room) {
   });
   room.version += 1;
   broadcastState(roomId, room);
-  io.to(roomId).emit("game:finished", { winnerId });
+  io.to(roomId).emit("game:finished", { winnerId: room.state.winnerId });
+  return true;
 }
 
 function resumeIfReady(roomId, room) {
-  if (room.status !== "playing" || !room.paused || room.players.some((player) => player.status === "disconnected")) return;
+  if (
+    room.status !== "playing" ||
+    !room.paused ||
+    room.players.some((player) => player.status === "disconnected")
+  )
+    return;
+  const current = room.state.marbles.find((marble) => marble.id === room.turnPlayerId);
+  if (!current?.alive) {
+    const next = nextAlive(room, room.turnPlayerId);
+    if (next === undefined) {
+      finishGame(roomId, room);
+      return;
+    }
+    room.turnPlayerId = next;
+    room.turnId += 1;
+    room.pausedRemainingMs = TURN_LIMIT_MS;
+  }
   room.paused = false;
-  room.deadline = Date.now() + room.pausedRemainingMs;
+  room.deadline =
+    Date.now() + (room.pausedRemainingMs > 0 ? room.pausedRemainingMs : TURN_LIMIT_MS);
   room.pausedRemainingMs = 0;
   room.version += 1;
   io.to(roomId).emit("game:resumed", {});
@@ -155,7 +214,8 @@ function eliminatePlayer(roomId, room, player, reason) {
   player.socketId = undefined;
   player.reconnectToken = undefined;
   socketRooms.forEach((mappedRoom, socketId) => {
-    if (mappedRoom === roomId && !io.sockets.sockets.get(socketId)?.connected) socketRooms.delete(socketId);
+    if (mappedRoom === roomId && !io.sockets.sockets.get(socketId)?.connected)
+      socketRooms.delete(socketId);
   });
   const marble = room.state.marbles.find((candidate) => candidate.id === player.id);
   if (marble) {
@@ -164,13 +224,35 @@ function eliminatePlayer(roomId, room, player, reason) {
     marble.eliminationReason = reason;
   }
   io.to(roomId).emit("player:eliminated", { playerId: player.id, reason });
-  if (room.turnPlayerId === player.id && room.status === "playing") {
-    room.moving = false;
-    advanceTurn(roomId, room);
-  }
+  const eliminatedCurrentTurn = room.turnPlayerId === player.id;
   const alive = room.state.marbles.filter((marble) => marble.alive);
-  if (room.status === "playing" && alive.length <= 1) finishGame(roomId, room);
-  else resumeIfReady(roomId, room);
+  if (room.status === "playing" && alive.length <= 1) {
+    finishGame(roomId, room);
+    publish(roomId);
+    return;
+  }
+  if (room.status === "playing" && eliminatedCurrentTurn) {
+    room.moving = false;
+    const next = nextAlive(room, player.id);
+    if (next === undefined) {
+      finishGame(roomId, room);
+      publish(roomId);
+      return;
+    }
+    room.turnPlayerId = next;
+    room.turnId += 1;
+    room.deadline = Date.now() + TURN_LIMIT_MS;
+    room.pausedRemainingMs = TURN_LIMIT_MS;
+  }
+  if (room.status === "playing" && room.paused) {
+    if (room.players.some((candidate) => candidate.status === "disconnected")) {
+      room.deadline = 0;
+    } else {
+      resumeIfReady(roomId, room);
+      publish(roomId);
+      return;
+    }
+  }
   room.version += 1;
   broadcastState(roomId, room);
   publish(roomId);
@@ -232,55 +314,137 @@ function leaveRoom(socket, requestedRoom) {
   player.reconnectToken = undefined;
   if (room.players.length === 0) rooms.delete(id);
   else {
-    if (!room.players.some((candidate) => candidate.id === room.hostId)) room.hostId = room.players[0].id;
+    if (!room.players.some((candidate) => candidate.id === room.hostId))
+      room.hostId = room.players[0].id;
     publish(id);
   }
 }
 
 setInterval(() => {
   for (const [roomId, room] of rooms) {
-    if (room.status === "playing" && !room.paused && !room.moving && Date.now() > room.deadline) advanceTurn(roomId, room);
+    if (room.status === "playing" && !room.paused && !room.moving && Date.now() > room.deadline)
+      advanceTurn(roomId, room);
   }
 }, 250);
 
 io.on("connection", (socket) => {
+  const rateBuckets = {
+    create: [],
+    join: [],
+    move: [],
+  };
+  const allowRate = (key, { max, windowMs }) => {
+    const now = Date.now();
+    const bucket = rateBuckets[key];
+    while (bucket.length > 0 && now - bucket[0] > windowMs) bucket.shift();
+    if (bucket.length >= max) return false;
+    bucket.push(now);
+    return true;
+  };
+
   socket.on("room:create", (payload, ack) => {
+    if (!allowRate("create", CREATE_ROOM_RATE_LIMIT))
+      return emitError(socket, "요청이 너무 많습니다. 잠시 후 다시 시도하세요.", ack);
     if (socketRooms.has(socket.id)) return emitError(socket, "먼저 현재 방에서 나가세요.", ack);
     const maxPlayers = Number(payload?.maxPlayers);
-    if (!validName(payload?.name) || !Number.isInteger(maxPlayers) || maxPlayers < 2 || maxPlayers > 4) return emitError(socket, "닉네임은 1~10자, 인원수는 2~4명이어야 합니다.", ack);
+    if (
+      !validName(payload?.name) ||
+      !Number.isInteger(maxPlayers) ||
+      maxPlayers < 2 ||
+      maxPlayers > 4
+    )
+      return emitError(socket, "닉네임은 1~10자, 인원수는 2~4명이어야 합니다.", ack);
+    if (rooms.size >= MAX_ROOM_COUNT)
+      return emitError(socket, "생성 가능한 방 한도를 초과했습니다.", ack);
     let roomId;
-    do roomId = String(Math.floor(Math.random() * 10_000)).padStart(4, "0"); while (rooms.has(roomId));
-    const player = { id: 0, socketId: socket.id, name: payload.name.trim(), status: "connected", reconnectToken: randomBytes(32).toString("hex") };
-    const room = { hostId: 0, maxPlayers, status: "waiting", players: [player], nextId: 1, gameId: 0, version: 0, turnId: 0, turnPlayerId: 0, deadline: 0, moving: false, paused: false, pausedRemainingMs: 0, lastRequestId: "", state: { marbles: [] } };
+    let attempts = 0;
+    do {
+      roomId = String(Math.floor(Math.random() * 10_000)).padStart(4, "0");
+      attempts += 1;
+    } while (rooms.has(roomId) && attempts < ROOM_CODE_ISSUE_ATTEMPTS);
+    if (rooms.has(roomId))
+      return emitError(socket, "방 코드를 할당할 수 없습니다. 잠시 후 다시 시도하세요.", ack);
+    const player = {
+      id: 0,
+      socketId: socket.id,
+      name: payload.name.trim(),
+      status: "connected",
+      reconnectToken: randomBytes(32).toString("hex"),
+    };
+    const room = {
+      hostId: 0,
+      maxPlayers,
+      status: "waiting",
+      players: [player],
+      nextId: 1,
+      gameId: 0,
+      version: 0,
+      turnId: 0,
+      turnPlayerId: 0,
+      deadline: 0,
+      moving: false,
+      paused: false,
+      pausedRemainingMs: 0,
+      lastRequestId: "",
+      state: { marbles: [] },
+    };
     rooms.set(roomId, room);
     socketRooms.set(socket.id, roomId);
     socket.join(roomId);
-    socket.emit("room:created", { roomId, count: 1, playerId: 0, reconnectToken: player.reconnectToken });
+    socket.emit("room:created", {
+      roomId,
+      count: 1,
+      playerId: 0,
+      reconnectToken: player.reconnectToken,
+    });
     publish(roomId);
-    ack?.({ ok: true, playerId: 0, reconnectToken: player.reconnectToken });
+    emitAck(ack, { ok: true, playerId: 0, reconnectToken: player.reconnectToken });
   });
 
   socket.on("room:join", (payload, ack) => {
+    if (!allowRate("join", JOIN_ROOM_RATE_LIMIT))
+      return emitError(socket, "요청이 너무 많습니다. 잠시 후 다시 시도하세요.", ack);
     const id = roomIdOf(payload?.roomId);
     const room = rooms.get(id);
     if (socketRooms.has(socket.id)) return emitError(socket, "먼저 현재 방에서 나가세요.", ack);
     if (!room) return emitError(socket, "방을 찾을 수 없습니다.", ack);
-    if (room.status !== "waiting") return emitError(socket, "진행 중인 방에는 참여할 수 없습니다.", ack);
-    if (room.players.length >= room.maxPlayers || !validName(payload?.name)) return emitError(socket, "방이 가득 찼거나 닉네임이 올바르지 않습니다.", ack);
-    const player = { id: room.nextId++, socketId: socket.id, name: payload.name.trim(), status: "connected", reconnectToken: randomBytes(32).toString("hex") };
+    if (room.status !== "waiting")
+      return emitError(socket, "진행 중인 방에는 참여할 수 없습니다.", ack);
+    if (room.players.length >= room.maxPlayers || !validName(payload?.name))
+      return emitError(socket, "방이 가득 찼거나 닉네임이 올바르지 않습니다.", ack);
+    const player = {
+      id: room.nextId++,
+      socketId: socket.id,
+      name: payload.name.trim(),
+      status: "connected",
+      reconnectToken: randomBytes(32).toString("hex"),
+    };
     room.players.push(player);
     socketRooms.set(socket.id, id);
     socket.join(id);
     publish(id);
-    ack?.({ ok: true, playerId: player.id, reconnectToken: player.reconnectToken });
+    emitAck(ack, { ok: true, playerId: player.id, reconnectToken: player.reconnectToken });
   });
 
   socket.on("room:rejoin", (payload, ack) => {
     const id = roomIdOf(payload?.roomId);
     const token = sessionTokenOf(payload?.reconnectToken);
+    const mappedRoom = roomIdOf(socketRooms.get(socket.id));
+    if (mappedRoom && mappedRoom !== id)
+      return emitError(socket, "먼저 현재 방에서 나가세요.", ack);
     const room = rooms.get(id);
     const player = room?.players.find((candidate) => candidate.reconnectToken === token);
-    if (!room || !player || player.status === "eliminated" || room.status === "finished") return emitError(socket, "재접속 세션이 만료되었습니다.", ack);
+    if (!room || !player || player.status === "eliminated" || room.status === "finished")
+      return emitError(socket, "재접속 세션이 만료되었습니다.", ack);
+    if (player.socketId === socket.id && mappedRoom === id) {
+      emitAck(ack, {
+        ok: true,
+        playerId: player.id,
+        status: room.status,
+        state: room.status === "playing" ? snapshot(room) : undefined,
+      });
+      return;
+    }
     if (player.socketId && player.socketId !== socket.id) {
       socketRooms.delete(player.socketId);
       const oldSocket = io.sockets.sockets.get(player.socketId);
@@ -299,43 +463,89 @@ io.on("connection", (socket) => {
     publish(id);
     if (room.status === "playing") {
       socket.emit("game:start", {
-        roomId: id, gameId: room.gameId, playerId: player.id, turnId: room.turnId, deadline: room.deadline,
+        roomId: id,
+        gameId: room.gameId,
+        playerId: player.id,
+        turnId: room.turnId,
+        deadline: room.deadline,
         players: room.players.map(({ id: playerId, name }) => ({ id: playerId, name })),
         state: snapshot(room),
       });
     }
-    ack?.({ ok: true, playerId: player.id, status: room.status, state: room.status === "playing" ? snapshot(room) : undefined });
+    emitAck(ack, {
+      ok: true,
+      playerId: player.id,
+      status: room.status,
+      state: room.status === "playing" ? snapshot(room) : undefined,
+    });
   });
 
   socket.on("room:start", (payload, ack) => {
     const id = roomIdOf(payload?.roomId);
     const room = rooms.get(id);
-    if (!room || room.hostId !== room.players.find((player) => player.socketId === socket.id)?.id || room.status !== "waiting" || room.players.length !== room.maxPlayers || room.players.some((player) => player.status !== "connected")) return emitError(socket, "게임을 시작할 수 없습니다.", ack);
+    if (
+      !room ||
+      room.hostId !== room.players.find((player) => player.socketId === socket.id)?.id ||
+      room.status !== "waiting" ||
+      room.players.length !== room.maxPlayers ||
+      room.players.some((player) => player.status !== "connected")
+    )
+      return emitError(socket, "게임을 시작할 수 없습니다.", ack);
     resetGameState(room);
     room.status = "playing";
-    room.players.forEach((player) => io.to(player.socketId).emit("game:start", {
-      roomId: id, gameId: room.gameId, playerId: player.id, turnId: room.turnId, deadline: room.deadline,
-      players: room.players.map(({ id: playerId, name }) => ({ id: playerId, name })),
-      state: snapshot(room),
-    }));
-    ack?.({ ok: true });
+    room.players.forEach((player) =>
+      io.to(player.socketId).emit("game:start", {
+        roomId: id,
+        gameId: room.gameId,
+        playerId: player.id,
+        turnId: room.turnId,
+        deadline: room.deadline,
+        players: room.players.map(({ id: playerId, name }) => ({ id: playerId, name })),
+        state: snapshot(room),
+      }),
+    );
+    emitAck(ack, { ok: true });
   });
 
   socket.on("room:leave", (payload, ack) => {
     leaveRoom(socket, payload?.roomId);
-    ack?.({ ok: true });
+    emitAck(ack, { ok: true });
   });
 
   socket.on("game:move", (payload, ack) => {
+    if (!allowRate("move", MOVE_RATE_LIMIT))
+      return emitError(socket, "입력이 너무 빠릅니다. 잠시 후 다시 시도하세요.", ack);
     const id = roomIdOf(payload?.roomId);
     const room = rooms.get(id);
     const player = room?.players.find((candidate) => candidate.socketId === socket.id);
     const x = payload?.x;
     const y = payload?.y;
-    const requestId = typeof payload?.requestId === "string" ? payload.requestId : "";
+    const requestId = validRequestId(payload?.requestId) ? payload.requestId : "";
+    const hasValidCoordinates =
+      typeof x === "number" &&
+      typeof y === "number" &&
+      finiteCoordinate(x, 10, WIDTH - 10) &&
+      finiteCoordinate(y, 10, HEIGHT - 10);
     const current = room?.state.marbles.find((marble) => marble.id === room.turnPlayerId);
-    const distance = current ? Math.hypot(x - current.x, y - current.y) : Infinity;
-    if (!room || !player || player.status !== "connected" || room.status !== "playing" || room.paused || room.moving || player.id !== room.turnPlayerId || payload?.gameId !== room.gameId || payload?.turnId !== room.turnId || !requestId || requestId === room.lastRequestId || !finiteCoordinate(x, 10, WIDTH - 10) || !finiteCoordinate(y, 10, HEIGHT - 10) || distance < 8 || distance > MAX_MOVE_DISTANCE || Date.now() > room.deadline) {
+    const distance =
+      current && hasValidCoordinates ? Math.hypot(x - current.x, y - current.y) : Infinity;
+    if (
+      !room ||
+      !player ||
+      player.status !== "connected" ||
+      room.status !== "playing" ||
+      room.paused ||
+      room.moving ||
+      player.id !== room.turnPlayerId ||
+      payload?.gameId !== room.gameId ||
+      payload?.turnId !== room.turnId ||
+      !requestId ||
+      requestId === room.lastRequestId ||
+      !hasValidCoordinates ||
+      distance < 8 ||
+      distance > MAX_MOVE_DISTANCE ||
+      Date.now() > room.deadline
+    ) {
       return emitError(socket, "유효하지 않거나 만료된 턴 입력입니다.", ack);
     }
     room.lastRequestId = requestId;
@@ -347,7 +557,12 @@ io.on("connection", (socket) => {
     current.inHole = false;
     const force = Math.min(100, distance / 2);
     for (const other of room.state.marbles) {
-      if (other.id === current.id || !other.alive || segmentDistance(startX, startY, x, y, other.x, other.y) > MARBLE_RADIUS * 2) continue;
+      if (
+        other.id === current.id ||
+        !other.alive ||
+        segmentDistance(startX, startY, x, y, other.x, other.y) > MARBLE_RADIUS * 2
+      )
+        continue;
       if (current.lion) {
         other.alive = false;
         current.score += 2;
@@ -362,16 +577,29 @@ io.on("connection", (socket) => {
         const collisionY = other.y - current.y;
         const collisionDistance = Math.hypot(collisionX, collisionY);
         const shotDistance = Math.hypot(x - startX, y - startY) || 1;
-        const directionX = collisionDistance > 0 ? collisionX / collisionDistance : (x - startX) / shotDistance;
-        const directionY = collisionDistance > 0 ? collisionY / collisionDistance : (y - startY) / shotDistance;
+        const directionX =
+          collisionDistance > 0 ? collisionX / collisionDistance : (x - startX) / shotDistance;
+        const directionY =
+          collisionDistance > 0 ? collisionY / collisionDistance : (y - startY) / shotDistance;
         const pushDistance = PUSH_DISTANCE_BASE + force * PUSH_DISTANCE_PER_FORCE;
-        other.x = clamp(other.x + directionX * pushDistance, MIN_COORDINATE, WIDTH - MIN_COORDINATE);
-        other.y = clamp(other.y + directionY * pushDistance, MIN_COORDINATE, HEIGHT - MIN_COORDINATE);
+        other.x = clamp(
+          other.x + directionX * pushDistance,
+          MIN_COORDINATE,
+          WIDTH - MIN_COORDINATE,
+        );
+        other.y = clamp(
+          other.y + directionY * pushDistance,
+          MIN_COORDINATE,
+          HEIGHT - MIN_COORDINATE,
+        );
       }
     }
     if (!current.lion) {
       const hole = HOLES[current.hole];
-      if (hole && segmentDistance(startX, startY, x, y, hole.x, hole.y) <= HOLE_RADIUS + MARBLE_RADIUS) {
+      if (
+        hole &&
+        segmentDistance(startX, startY, x, y, hole.x, hole.y) <= HOLE_RADIUS + MARBLE_RADIUS
+      ) {
         current.score += 2;
         current.x = hole.x;
         current.y = hole.y;
@@ -389,13 +617,15 @@ io.on("connection", (socket) => {
       advanceTurn(id, room);
     }
     broadcastState(id, room, requestId);
-    ack?.({ ok: true, version: room.version, requestId });
+    emitAck(ack, { ok: true, version: room.version, requestId });
   });
 
   socket.on("disconnect", (reason) => {
-  console.warn(`[socket] disconnected ${socket.id}: ${reason}`);
-  markDisconnected(socket);
+    console.warn(`[socket] disconnected ${socket.id}: ${reason}`);
+    markDisconnected(socket);
   });
 });
 
-httpServer.listen(port, () => console.log(`Socket.IO server listening on http://localhost:${port}`));
+httpServer.listen(port, () =>
+  console.log(`Socket.IO server listening on http://localhost:${port}`),
+);
