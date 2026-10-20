@@ -20,8 +20,8 @@ const MAX_MOVE_DISTANCE = 200;
 const MARBLE_RADIUS = 12.5;
 const HOLE_RADIUS = 17.5;
 const MIN_COORDINATE = 10;
-const PUSH_DISTANCE_BASE = 50;
-const PUSH_DISTANCE_PER_FORCE = 1.8;
+const PUSH_DISTANCE_BASE = 20;
+const PUSH_DISTANCE_PER_FORCE = 0.8;
 const HOLES = [{ x: 300, y: 950 }, { x: 300, y: 700 }, { x: 300, y: 400 }, { x: 500, y: 400 }, { x: 100, y: 400 }, { x: 300, y: 150 }];
 
 const validName = (value) => typeof value === "string" && value.trim().length > 0 && value.trim().length <= 10;
