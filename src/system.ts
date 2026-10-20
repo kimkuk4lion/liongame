@@ -70,7 +70,7 @@ export class System {
     playerIds: number[],
     private readonly renderFunction: RenderFunction,
     names: string[] = [],
-    private readonly serverControlled = false
+    private readonly serverControlled = false,
   ) {
     this.marbles = playerIds.map((id, i) => ({
       id,
@@ -87,9 +87,21 @@ export class System {
     this.timer = setInterval(() => this.tick(), 250);
   }
 
-  moveMarble(x: number, y: number, playerId = this.turn, randomize = false): MoveResult | undefined {
+  moveMarble(
+    x: number,
+    y: number,
+    playerId = this.turn,
+    randomize = false,
+  ): MoveResult | undefined {
     const index = this.indexById.get(playerId);
-    if (this.destroyed || this.serverControlled || this.state !== "wait_move" || index === undefined || playerId !== this.turn || !this.marbles[index]?.alive) {
+    if (
+      this.destroyed ||
+      this.serverControlled ||
+      this.state !== "wait_move" ||
+      index === undefined ||
+      playerId !== this.turn ||
+      !this.marbles[index]?.alive
+    ) {
       return undefined;
     }
     const marble = this.marbles[index];
@@ -176,7 +188,9 @@ export class System {
     winnerId?: number;
   }) {
     if (this.destroyed) return;
-    const previousPositions = new Map(this.marbles.map((marble) => [marble.id, { x: marble.x, y: marble.y }]));
+    const previousPositions = new Map(
+      this.marbles.map((marble) => [marble.id, { x: marble.x, y: marble.y }]),
+    );
     const incoming = new Map(state.marbles.map((marble) => [marble.id, marble]));
     this.marbles.forEach((marble) => {
       const next = incoming.get(marble.id);
@@ -191,10 +205,14 @@ export class System {
     });
     this.turn = state.turnPlayerId;
     this.state = state.state;
-    this.winner = state.winnerId === undefined ? undefined : this.marbles[this.indexById.get(state.winnerId) ?? -1];
-    const remainingMs = state.state === "paused"
-      ? state.pausedRemainingMs ?? 0
-      : Math.max(0, state.deadline - Date.now());
+    this.winner =
+      state.winnerId === undefined
+        ? undefined
+        : this.marbles[this.indexById.get(state.winnerId) ?? -1];
+    const remainingMs =
+      state.state === "paused"
+        ? (state.pausedRemainingMs ?? 0)
+        : Math.max(0, state.deadline - Date.now());
     this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - remainingMs);
     this.remainingSeconds = Math.ceil(remainingMs / 1000);
     this.lastRenderedSeconds = this.remainingSeconds;
@@ -220,16 +238,16 @@ export class System {
   }
 
   private tick() {
-    if (this.state === "finished" || this.serverControlled) return;
+    if (this.state === "finished") return;
     this.remainingSeconds = Math.max(
       0,
-      Math.ceil((TURN_LIMIT_MS - (Date.now() - this.turnStartedAt)) / 1000)
+      Math.ceil((TURN_LIMIT_MS - (Date.now() - this.turnStartedAt)) / 1000),
     );
     if (this.remainingSeconds !== this.lastRenderedSeconds) {
       this.lastRenderedSeconds = this.remainingSeconds;
       this.render();
     }
-    if (this.state === "wait_move" && this.remainingSeconds === 0) {
+    if (!this.serverControlled && this.state === "wait_move" && this.remainingSeconds === 0) {
       this.nextTurn();
       this.render();
     }
@@ -255,7 +273,7 @@ export class System {
     shotY: number,
     force: number,
     previousX: number,
-    previousY: number
+    previousY: number,
   ): boolean {
     for (const other of this.marbles) {
       if (other.id === marble.id || !other.alive) continue;
@@ -299,7 +317,7 @@ export class System {
           marble.y,
           targetHole.x,
           targetHole.y,
-          HOLE_RADIUS + MARBLE_RADIUS
+          HOLE_RADIUS + MARBLE_RADIUS,
         )
       ) {
         marble.score += 2;
@@ -380,19 +398,19 @@ function segmentCollision(
   endY: number,
   circleX: number,
   circleY: number,
-  radius: number
+  radius: number,
 ) {
   const segmentX = endX - startX;
   const segmentY = endY - startY;
   const segmentLengthSquared = segmentX * segmentX + segmentY * segmentY;
-  const projection = segmentLengthSquared === 0
-    ? 0
-    : clamp(
-        ((circleX - startX) * segmentX + (circleY - startY) * segmentY) /
-          segmentLengthSquared,
-        0,
-        1
-      );
+  const projection =
+    segmentLengthSquared === 0
+      ? 0
+      : clamp(
+          ((circleX - startX) * segmentX + (circleY - startY) * segmentY) / segmentLengthSquared,
+          0,
+          1,
+        );
   const closestX = startX + segmentX * projection;
   const closestY = startY + segmentY * projection;
   return Math.hypot(circleX - closestX, circleY - closestY) <= radius;

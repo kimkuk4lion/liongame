@@ -16,6 +16,7 @@ export class Game extends Scene {
   private latestVersion = 0;
   private aborted = false;
   private abortTimer: number | undefined;
+  private finishClickArmed = false;
   private readonly cleanup: (() => void)[] = [];
 
   constructor() {
@@ -75,7 +76,7 @@ export class Game extends Scene {
       .setOrigin(0.5);
     backButton.add([backBackground, backLabel]);
     backBackground.on("pointerdown", () => {
-      if (window.confirm("게임을 나가면 경기가 중단됩니다. 메인으로 이동할까요?"))
+      if (window.confirm("게임을 나가면 현재 플레이어는 탈락 처리됩니다. 메인으로 이동할까요?"))
         this.settings.onExit?.();
     });
     const guideLine = this.add
@@ -105,9 +106,9 @@ export class Game extends Scene {
     );
     this.system = system;
     if (this.settings.mode === "multi" && this.settings.initialState) {
-      system.applyServerState(
-        this.settings.initialState as Parameters<System["applyServerState"]>[0],
-      );
+      const initialState = this.settings.initialState as Parameters<System["applyServerState"]>[0];
+      this.latestVersion = Math.max(this.latestVersion, initialState.version ?? 0);
+      system.applyServerState(initialState);
     }
 
     const onState = (state: {
@@ -168,9 +169,11 @@ export class Game extends Scene {
       };
       const onEliminated = (data: { playerId: number; reason: string }) => {
         const player = system.getSnapshot().marbles.find((marble) => marble.id === data.playerId);
-        description.setText(
-          `${player?.name ?? `플레이어 ${data.playerId + 1}`}가 복귀하지 않아 게임에서 탈락했습니다.`,
-        );
+        const reasonText =
+          data.reason === "manual_leave"
+            ? "게임에서 나가 탈락했습니다."
+            : "복귀 시간이 만료되어 탈락했습니다.";
+        description.setText(`${player?.name ?? `플레이어 ${data.playerId + 1}`}가 ${reasonText}`);
       };
       const onPaused = () => {
         this.cancelAim(aimLine, pullLine, trajectory, powerText);
@@ -252,7 +255,6 @@ export class Game extends Scene {
       if (!current || !current.alive || snapshot.state !== "wait_move") return;
       if (this.settings.mode === "multi" && current.id !== this.settings.playerId) return;
       if (Math.hypot(pointer.x - current.x, pointer.y - current.y) > 40) return;
-      if (this.settings.mode === "multi" && current.id !== this.settings.playerId) return;
       this.dragging = true;
       this.aimTurn = current.id;
       this.aimTurnId = this.settings.turnId ?? this.aimTurnId + 1;
@@ -418,12 +420,20 @@ export class Game extends Scene {
     });
 
     if (args.winner && !this.children.getByName("scoreboard")) {
-      this.input.once("pointerdown", () => this.showScoreboard(args.marbles));
+      if (!this.finishClickArmed) {
+        this.finishClickArmed = true;
+        this.input.once("pointerdown", () => {
+          this.finishClickArmed = false;
+          if (!this.children.getByName("scoreboard")) this.showScoreboard(args.marbles);
+        });
+      }
+    } else if (!args.winner) {
+      this.finishClickArmed = false;
     }
   }
 
   private showScoreboard(marbles: Marble[]) {
-    const board = marbles
+    const board = [...marbles]
       .sort((a, b) => b.score - a.score)
       .map((marble, index) => `${index + 1}. ${marble.name}  ${marble.score}점`)
       .join("\n");
