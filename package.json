@@ -12,7 +12,8 @@
     "dev": "vite --config vite/config.dev.mjs --host",
     "build": "vite build --config vite/config.prod.mjs",
     "typecheck": "tsc --noEmit",
-    "server": "node server/socket-server.mjs"
+    "server": "node --env-file=.env.development server/socket-server.mjs",
+    "server:prod": "node --env-file=.env.production server/socket-server.mjs"
   },
   "devDependencies": {
     "typescript": "~5.7.2",
