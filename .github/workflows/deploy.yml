@@ -35,6 +35,8 @@ jobs:
         run: npm run typecheck
 
       - name: Build Vite
+        env:
+          VITE_SOCKET_URL: https://game.cloudxt.app
         run: npm run build
 
       - name: Setup SSH
