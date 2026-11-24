@@ -1,6 +1,7 @@
 import { io, Socket } from "socket.io-client";
 import StartGame from "./game/main";
 import type { Game as PhaserGame } from "phaser";
+import { TURN_SECONDS, type Difficulty } from "./constants";
 
 export type GameSettings = {
   mode: "practice" | "multi";
@@ -15,6 +16,10 @@ export type GameSettings = {
   reconnectToken?: string;
   turnId?: number;
   socket?: Socket;
+  difficulty?: Difficulty;
+  hostId?: number;
+  rematchReady?: boolean;
+  onFinished?: () => void;
   onExit?: () => void;
   onAbort?: () => void;
 };
@@ -26,6 +31,7 @@ type WaitingRoomUpdate = {
   hostId: number;
   players?: { id: number; name: string; isHost: boolean }[];
   status: string;
+  rematchReady?: boolean;
 };
 
 type GameStartPayload = {
@@ -34,6 +40,9 @@ type GameStartPayload = {
   playerId: number;
   turnId: number;
   deadline?: number;
+  difficulty?: Difficulty;
+  hostId?: number;
+  rematchReady?: boolean;
   players: { id: number; name: string }[];
   state: unknown;
 };
@@ -44,6 +53,7 @@ const SERVER_URL =
 let nickname = "플레이어";
 let socket: Socket | undefined;
 let game: PhaserGame | undefined;
+let disposeRound: (() => void) | undefined;
 let screenGeneration = 0;
 let screen: "main" | "waiting" | "playing" = "main";
 let roomSession: { roomId: string; playerId: number; token?: string } | undefined;
@@ -65,6 +75,7 @@ function showLobby() {
   screenGeneration += 1;
   screen = "main";
   roomSession = undefined;
+  disposeRound?.();
   game?.destroy(true);
   game = undefined;
   socket?.disconnect();
@@ -191,7 +202,7 @@ function showMultiplayer(root: HTMLElement) {
           ok: boolean;
           error?: string;
           playerId?: number;
-          status?: "waiting" | "playing";
+          status?: "waiting" | "playing" | "finished";
           room?: WaitingRoomUpdate;
           gameStartData?: GameStartPayload;
         }) => {
@@ -213,7 +224,7 @@ function showMultiplayer(root: HTMLElement) {
           if (result.status === "waiting") {
             const room = result.room ?? latestWaitingRoomUpdate;
             if (room) onRoomUpdate(room);
-          } else if (result.status === "playing" && result.gameStartData) {
+          } else if (result.gameStartData) {
             onStart(result.gameStartData);
           } else {
             status.textContent = "진행 중 게임 상태를 복구 중입니다...";
@@ -270,6 +281,9 @@ function showMultiplayer(root: HTMLElement) {
       roomId: data.roomId,
       gameId: data.gameId,
       playerId: data.playerId,
+      hostId: data.hostId,
+      difficulty: data.difficulty,
+      rematchReady: data.rematchReady,
       reconnectToken: roomSession?.token,
       turnId: data.turnId,
       initialState: data.state,
@@ -421,14 +435,7 @@ function showWaiting(
   const onUpdate = (room: WaitingRoomUpdate) => {
     applyWaitingRoomUpdate(room);
   };
-  const onStart = (data: {
-    roomId: string;
-    gameId: number;
-    playerId: number;
-    turnId: number;
-    players: { id: number; name: string }[];
-    state: unknown;
-  }) => {
+  const onStart = (data: GameStartPayload) => {
     if (generation !== screenGeneration) return;
     dispose();
     screen = "playing";
@@ -440,6 +447,9 @@ function showWaiting(
       roomId: data.roomId,
       gameId: data.gameId,
       playerId: data.playerId,
+      hostId: data.hostId,
+      difficulty: data.difficulty,
+      rematchReady: data.rematchReady,
       reconnectToken: roomSession?.token,
       turnId: data.turnId,
       initialState: data.state,
@@ -512,25 +522,119 @@ function clearSession() {
 
 function start(settings: GameSettings) {
   clearNavigationTimer();
+  disposeRound?.();
   const root = document.getElementById("game-container")!;
   root.classList.add("game-active");
   root.innerHTML = "";
   const onExit = settings.onExit ?? showLobby;
   const onAbort = settings.onAbort;
-  settings.onExit = () => {
+  const currentSocket = settings.socket;
+  let active = true;
+  let room = { hostId: settings.hostId, rematchReady: settings.rematchReady };
+  let updateActions: (() => void) | undefined;
+  const onRoomUpdate = (update: WaitingRoomUpdate) => {
+    if (update.roomId !== settings.roomId) return;
+    room = { hostId: update.hostId, rematchReady: update.rematchReady };
+    updateActions?.();
+  };
+  const onNextRound = (data: GameStartPayload) => {
+    if (data.roomId !== settings.roomId || data.gameId < (settings.gameId ?? 0)) return;
+    start({
+      ...settings,
+      gameId: data.gameId,
+      turnId: data.turnId,
+      difficulty: data.difficulty,
+      hostId: data.hostId,
+      rematchReady: data.rematchReady,
+      playerId: data.playerId,
+      playerCount: data.players.length,
+      playerIds: data.players.map((player) => player.id),
+      names: data.players.map((player) => player.name),
+      initialState: data.state,
+    });
+  };
+  if (currentSocket) {
+    currentSocket.on("game:start", onNextRound);
+    currentSocket.on("room:update", onRoomUpdate);
+  }
+  disposeRound = () => {
+    active = false;
+    currentSocket?.off("game:start", onNextRound);
+    currentSocket?.off("room:update", onRoomUpdate);
+    disposeRound = undefined;
+  };
+  const leaveRound = (callback: () => void) => {
+    if (!active) return;
+    disposeRound?.();
     game?.destroy(true);
     game = undefined;
-    onExit();
+    callback();
   };
-  settings.onAbort = onAbort
-    ? () => {
-        game?.destroy(true);
-        game = undefined;
-        onAbort();
+  const onFinished = () => {
+    if (!active) return;
+    const form = document.createElement("form");
+    form.className = "result-actions";
+    form.innerHTML = `
+      <div class="result-controls">
+        <label for="rematch-difficulty">다음 경기 난이도</label>
+        <select id="rematch-difficulty">
+          <option value="easy">쉬움 · ${TURN_SECONDS.easy}초</option>
+          <option value="normal">보통 · ${TURN_SECONDS.normal}초</option>
+          <option value="hard">어려움 · ${TURN_SECONDS.hard}초</option>
+        </select>
+        <button type="submit">재대결</button>
+      </div>
+      <p class="status" role="status"></p>`;
+    const controls = form.querySelector<HTMLElement>(".result-controls")!;
+    const difficulty = form.querySelector("select")!;
+    const rematch = form.querySelector("button")!;
+    const status = form.querySelector("p")!;
+    difficulty.value = settings.difficulty ?? "normal";
+    let pending = false;
+    updateActions = () => {
+      const isHost = !currentSocket || room.hostId === settings.playerId;
+      controls.hidden = !isHost;
+      rematch.disabled = pending || Boolean(currentSocket && !room.rematchReady);
+      status.textContent = !isHost
+        ? "방장이 재대결을 시작할 수 있습니다."
+        : pending ? "재대결을 준비 중입니다…"
+          : rematch.disabled ? "참가자가 두 명 이상이고 모두 연결되어야 재대결할 수 있습니다." : "";
+    };
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (!active || controls.hidden || rematch.disabled) return;
+      const selected = difficulty.value as Difficulty;
+      if (!currentSocket) {
+        start({ ...settings, difficulty: selected });
+        return;
       }
-    : undefined;
+      pending = true;
+      updateActions?.();
+      try {
+        if (!currentSocket.connected) throw new Error("서버에 다시 연결한 뒤 시도해 주세요.");
+        const result = await currentSocket.timeout(4000).emitWithAck("room:rematch", {
+          roomId: settings.roomId,
+          gameId: settings.gameId,
+          difficulty: selected,
+        });
+        if (!result?.ok) throw new Error(result?.error || "재대결을 시작할 수 없습니다.");
+      } catch (error) {
+        if (!active) return;
+        pending = false;
+        updateActions?.();
+        status.textContent = error instanceof Error ? error.message : "재대결을 시작할 수 없습니다.";
+      }
+    });
+    updateActions();
+    root.append(form);
+  };
   game?.destroy(true);
-  game = StartGame("game-container", settings);
+  game = StartGame("game-container", {
+    ...settings,
+    onFinished,
+    onExit: () => leaveRound(onExit),
+    onAbort: onAbort ? () => leaveRound(onAbort) : undefined,
+  });
 }
 
 function escapeHtml(value: string) {

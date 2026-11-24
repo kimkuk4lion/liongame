@@ -4,6 +4,7 @@ import {
   MOVE_RANDOM,
   PUSH_DISTANCE_BASE,
   PUSH_DISTANCE_PER_FORCE,
+  TURN_SECONDS,
 } from "./constants";
 
 export type Hole = { id: number; x: number; y: number };
@@ -47,7 +48,6 @@ export const HOLES: Hole[] = [
 
 const MARBLE_RADIUS = 25 / 2;
 const HOLE_RADIUS = 35 / 2;
-const TURN_LIMIT_MS = 10_000;
 const SHOT_DURATION_MS = 1500;
 const PUSH_DURATION_MS = 850;
 
@@ -56,14 +56,14 @@ export class System {
   private readonly marbles: Marble[];
   private readonly holes = HOLES;
   private state: GameState = "wait_move";
-  private remainingSeconds = 10;
+  private remainingSeconds: number;
   private turnStartedAt = Date.now();
   private timer: ReturnType<typeof setInterval> | undefined;
   private winner: Marble | undefined;
   private destroyed = false;
   private frameIds = new Set<number>();
   private readonly indexById = new Map<number, number>();
-  private lastRenderedSeconds = 10;
+  private lastRenderedSeconds: number;
   private serverAnimationToken = 0;
 
   constructor(
@@ -72,7 +72,9 @@ export class System {
     names: string[] = [],
     private readonly serverControlled = false,
     private readonly onLionHit?: (x: number, y: number) => void,
+    private readonly turnSeconds: number = TURN_SECONDS.normal,
   ) {
+    this.remainingSeconds = this.lastRenderedSeconds = turnSeconds;
     this.marbles = playerIds.map((id, i) => ({
       id,
       name: names[i] ?? `플레이어 ${i + 1}`,
@@ -170,7 +172,7 @@ export class System {
     const index = this.indexById.get(playerId);
     if (this.destroyed || index === undefined || !this.marbles[index]?.alive) return;
     this.turn = playerId;
-    this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - remainingMs);
+    this.turnStartedAt = Date.now() - (this.turnSeconds * 1000 - remainingMs);
     this.remainingSeconds = Math.ceil(Math.max(0, remainingMs) / 1000);
     this.state = "wait_move";
     this.lastRenderedSeconds = this.remainingSeconds;
@@ -214,7 +216,7 @@ export class System {
       state.state === "paused"
         ? (state.pausedRemainingMs ?? 0)
         : Math.max(0, state.deadline - Date.now());
-    this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - remainingMs);
+    this.turnStartedAt = Date.now() - (this.turnSeconds * 1000 - remainingMs);
     this.remainingSeconds = Math.ceil(remainingMs / 1000);
     this.lastRenderedSeconds = this.remainingSeconds;
     const token = ++this.serverAnimationToken;
@@ -242,7 +244,7 @@ export class System {
     if (this.state === "finished") return;
     this.remainingSeconds = Math.max(
       0,
-      Math.ceil((TURN_LIMIT_MS - (Date.now() - this.turnStartedAt)) / 1000),
+      Math.ceil((this.turnSeconds * 1000 - (Date.now() - this.turnStartedAt)) / 1000),
     );
     if (this.remainingSeconds !== this.lastRenderedSeconds) {
       this.lastRenderedSeconds = this.remainingSeconds;
@@ -262,7 +264,7 @@ export class System {
       if (!this.marbles[nextTurn].alive) continue;
       this.turn = this.marbles[nextTurn].id;
       this.turnStartedAt = Date.now();
-      this.remainingSeconds = 10;
+      this.remainingSeconds = this.turnSeconds;
       return;
     }
     this.checkWinner();

@@ -5,3 +5,5 @@ export const MOVE_DURATION = 1500;
 export const AIM_SENSITIVITY = 1.4;
 export const PUSH_DISTANCE_BASE = 20;
 export const PUSH_DISTANCE_PER_FORCE = 0.8;
+export const TURN_SECONDS = { easy: 15, normal: 10, hard: 6 } as const;
+export type Difficulty = keyof typeof TURN_SECONDS;

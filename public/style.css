@@ -14,7 +14,7 @@
 body { margin: 0; }
 
 #game-container { min-height: 100dvh; }
-#game-container.game-active { height: 100dvh; }
+#game-container.game-active { position: relative; height: 100dvh; }
 #game-container canvas { display: block; }
 
 .lobby {
@@ -112,6 +112,23 @@ input, select { width: 100%; min-width: 0; background: #101e18; color: inherit; 
   overflow-wrap: anywhere;
 }
 .player-list li span { color: var(--gold); flex: none; }
+
+.result-actions {
+  position: absolute;
+  z-index: 1;
+  inset-inline: 0;
+  bottom: max(12px, env(safe-area-inset-bottom));
+  width: min(calc(100% - 24px), 380px);
+  margin-inline: auto;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+.result-controls { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
+.result-controls label { grid-column: 1 / -1; }
+.result-actions .status { margin: 8px 0 0; min-height: 0; }
+.result-actions .status:empty { display: none; }
 
 @media (max-width: 520px) {
   .mode-grid, .room-options { grid-template-columns: 1fr; }

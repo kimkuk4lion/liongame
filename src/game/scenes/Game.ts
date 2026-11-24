@@ -1,6 +1,6 @@
 import type { Socket } from "socket.io-client";
 import { Scene } from "phaser";
-import { AIM_SENSITIVITY, MOVE_DURATION, MOVE_RANDOM } from "../../constants";
+import { AIM_SENSITIVITY, MOVE_DURATION, MOVE_RANDOM, TURN_SECONDS } from "../../constants";
 import type { GameSettings } from "../../main";
 import { Marble, RenderArgs, System } from "../../system";
 
@@ -77,6 +77,7 @@ export class Game extends Scene {
     backBackground.on("pointerdown", () => {
       if (
         this.settings.mode === "practice" ||
+        this.system?.getSnapshot().state === "finished" ||
         window.confirm("게임을 나가면 현재 플레이어는 탈락 처리됩니다. 메인으로 이동할까요?")
       )
         this.settings.onExit?.();
@@ -106,6 +107,7 @@ export class Game extends Scene {
       this.settings.names,
       this.settings.mode === "multi",
       (x, y) => this.showLionHit(x, y),
+      TURN_SECONDS[this.settings.difficulty ?? "normal"],
     );
     this.system = system;
     if (this.settings.mode === "multi" && this.settings.initialState) {
@@ -142,6 +144,7 @@ export class Game extends Scene {
       this.socket.on("game:state", onState);
       this.cleanup.push(() => this.socket?.off("game:state", onState));
       const onError = (message: string) => {
+        if (system.getSnapshot().state === "finished") return;
         description.setText(message);
         system.applyServerState({
           version: this.latestVersion + 1,
@@ -427,7 +430,10 @@ export class Game extends Scene {
       }
     });
 
-    if (args.winner && !this.children.getByName("scoreboard")) this.showScoreboard(args.marbles);
+    if (args.state === "finished" && !this.children.getByName("scoreboard")) {
+      this.showScoreboard(args.marbles);
+      this.settings.onFinished?.();
+    }
   }
 
   private showLionHit(x: number, y: number) {
