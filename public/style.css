@@ -34,7 +34,7 @@ h1 { margin: 0; font-size: clamp(2rem, 7vw, 4rem); line-height: 1.15; letter-spa
 .subtitle, .room-hint, .status { color: var(--muted); line-height: 1.55; }
 .subtitle { margin: 14px 0 0; }
 
-.mode-grid, .room-options {
+.mode-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 16px;
@@ -87,9 +87,27 @@ button.mode-card-primary { background: #284235; border-color: #aa925d; }
 }
 label, .field-label { font-weight: 700; font-size: .9rem; }
 input, select { width: 100%; min-width: 0; background: #101e18; color: inherit; }
-.room-options { margin-top: 8px; }
-.room-option { min-width: 0; display: grid; gap: 8px; }
-.room-option button { margin-top: 4px; }
+.lobby-sections { display: grid; gap: 16px; }
+.room-create { grid-template-columns: minmax(0, 1fr) auto auto; align-items: end; }
+.room-field { display: grid; min-width: 0; gap: 6px; }
+.room-list { display: grid; gap: 8px; list-style: none; padding: 0; margin: 0; }
+.room-list:empty { display: none; }
+.room-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: #101e18;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.room-list li div { display: grid; gap: 4px; min-width: 0; overflow-wrap: anywhere; }
+.room-list li span { color: var(--muted); font-size: .875rem; }
+.room-join { flex: none; }
+.room-pagination { display: flex; align-items: center; justify-content: center; gap: 12px; }
+.room-pagination span { color: var(--muted); font-variant-numeric: tabular-nums; }
+#room-list-title { margin: 0; font-size: 1.25rem; }
+#lobby-status:empty { display: none; }
 .back-button, .secondary-button {
   background: transparent;
   border: 1px solid var(--line);
@@ -99,7 +117,8 @@ input, select { width: 100%; min-width: 0; background: #101e18; color: inherit; 
 .back-button:hover:not(:disabled), .secondary-button:hover:not(:disabled) { background: #284235; }
 .status { margin: 12px 2px 0; min-height: 1.55em; }
 .room-summary { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.room-code { display: block; color: var(--gold); font-size: 2.4rem; letter-spacing: .16em; font-variant-numeric: tabular-nums; }
+.waiting-title { display: block; margin-top: 4px; color: var(--gold); font-size: 1.5rem; overflow-wrap: anywhere; }
+#waiting-count { flex: none; }
 .room-hint { margin: 0; }
 .player-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
 .player-list li {
@@ -189,6 +208,6 @@ input, select { width: 100%; min-width: 0; background: #101e18; color: inherit; 
 .game-guide strong { display: block; margin-bottom: 3px; color: var(--gold); }
 
 @media (max-width: 520px) {
-  .mode-grid, .room-options { grid-template-columns: 1fr; }
+  .mode-grid, .room-create { grid-template-columns: 1fr; }
   button.mode-card { min-height: 0; }
 }

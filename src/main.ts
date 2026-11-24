@@ -26,10 +26,16 @@ export type GameSettings = {
   onAbort?: () => void;
 };
 
-type WaitingRoomUpdate = {
+type LobbyRoom = {
   roomId: string;
+  title: string;
   count: number;
   maxPlayers: number;
+  creatorName: string;
+};
+const ROOMS_PER_PAGE = 5;
+
+type WaitingRoomUpdate = LobbyRoom & {
   hostId: number;
   players?: { id: number; name: string; isHost: boolean }[];
   status: string;
@@ -99,7 +105,7 @@ function showLobby(notice = "") {
           </button>
           <button id="multi" class="mode-card mode-card-primary" disabled>
             <strong>멀티플레이</strong>
-            <span>친구와 방 코드를 공유하고 2~4인 대전을 즐기세요.</span>
+            <span>대기실에서 방을 만들거나 참가해 2~4인 대전을 즐기세요.</span>
             <span class="mode-action">멀티플레이 입장 <span aria-hidden="true">→</span></span>
           </button>
         </section>
@@ -136,7 +142,7 @@ function showLobby(notice = "") {
       void startRankedPractice(practice, status);
     };
     multi.onclick = () => {
-      if (requireLogin() && session?.member) showMultiplayer(root, session.member.nickname);
+      if (requireLogin()) showMultiplayer(root);
     };
   });
   root.querySelector("#my-page")?.addEventListener("click", () => {
@@ -193,36 +199,44 @@ async function startRankedPractice(button: HTMLButtonElement, status: HTMLElemen
   }
 }
 
-function showMultiplayer(root: HTMLElement, nickname: string) {
+function showMultiplayer(root: HTMLElement) {
   socket?.disconnect();
   clearNavigationTimer();
   screen = "waiting";
+  root.classList.remove("game-active");
   root.innerHTML = `
     <main class="lobby">
       <div class="flow">
         <button id="main-cancel" class="back-button" type="button">← 메인으로</button>
-        <h1>멀티플레이</h1>
-        <section id="room-setup" class="panel">
-          <label for="nickname">닉네임</label>
-          <input id="nickname" value="${escapeHtml(nickname)}" readonly>
-          <div class="room-options">
-            <div class="room-option">
-              <label for="count">참가 인원</label>
-              <select id="count"><option value="2">2명</option><option value="3">3명</option><option value="4">4명</option></select>
-              <button id="create" type="button" disabled>방 만들기</button>
+        <h1>멀티플레이 대기실</h1>
+        <div id="room-setup" class="lobby-sections">
+          <form id="create-room" class="panel room-create">
+            <div class="room-field">
+              <label for="room-title">방 제목</label>
+              <input id="room-title" name="title" maxlength="40" required>
             </div>
-            <form id="join-form" class="room-option">
-              <label for="room">방 코드</label>
-              <input id="room" maxlength="4" inputmode="numeric" pattern="[0-9]{4}" required placeholder="숫자 4자리">
-              <button id="join" type="submit" disabled>방 참여</button>
-            </form>
-          </div>
-        </section>
+            <div class="room-field">
+              <label for="count">최대 인원</label>
+              <select id="count" name="count"><option value="2">2명</option><option value="3">3명</option><option value="4">4명</option></select>
+            </div>
+            <button id="create" type="submit" disabled>방 만들기</button>
+          </form>
+          <section class="panel" aria-labelledby="room-list-title">
+            <h2 id="room-list-title">방 목록</h2>
+            <p id="room-list-empty" class="room-hint" role="status">방 목록을 불러오는 중입니다…</p>
+            <ul id="room-list" class="room-list"></ul>
+            <nav id="room-pagination" class="room-pagination" aria-label="방 목록 페이지" hidden>
+              <button id="previous-room-page" class="secondary-button" type="button">이전</button>
+              <span id="room-page-status" role="status"></span>
+              <button id="next-room-page" class="secondary-button" type="button">다음</button>
+            </nav>
+          </section>
+        </div>
         ${waitingPanel(true)}
         <p id="lobby-status" class="status" role="status">서버에 연결 중입니다…</p>
       </div>
     </main>`;
-  const generation = screenGeneration;
+  const generation = ++screenGeneration;
   socket = io(SERVER_URL, {
     autoConnect: false,
     withCredentials: true,
@@ -233,32 +247,114 @@ function showMultiplayer(root: HTMLElement, nickname: string) {
   });
   const currentSocket = socket;
   const status = root.querySelector("#lobby-status") as HTMLElement;
-  let roomCode = roomSession?.roomId ?? "";
+  let currentRoomId = roomSession?.roomId ?? "";
   let requestPending = false;
   let leavingToMain = false;
   let latestWaitingRoomUpdate: WaitingRoomUpdate | undefined;
+  const publicRooms = new Map<string, LobbyRoom>();
+  const roomList = root.querySelector<HTMLUListElement>("#room-list")!;
+  const roomListEmpty = root.querySelector<HTMLElement>("#room-list-empty")!;
+  const pagination = root.querySelector<HTMLElement>("#room-pagination")!;
+  const previousPage = root.querySelector<HTMLButtonElement>("#previous-room-page")!;
+  const nextPage = root.querySelector<HTMLButtonElement>("#next-room-page")!;
+  const pageStatus = root.querySelector<HTMLElement>("#room-page-status")!;
+  let roomPage = 0;
+  const renderRoomList = () => {
+    const focusedRoom = document.activeElement instanceof HTMLButtonElement
+      ? document.activeElement.dataset.roomId : undefined;
+    const pageCount = Math.max(1, Math.ceil(publicRooms.size / ROOMS_PER_PAGE));
+    roomPage = Math.max(0, Math.min(roomPage, pageCount - 1));
+    const firstRoom = roomPage * ROOMS_PER_PAGE;
+    // The server sends rooms in creation order and Map updates preserve each room's position.
+    const visibleRooms = Array.from(publicRooms.values()).reverse().slice(firstRoom, firstRoom + ROOMS_PER_PAGE);
+    const rows = visibleRooms.map((room) => {
+      const row = document.createElement("li");
+      const details = document.createElement("div");
+      const title = document.createElement("strong");
+      title.textContent = room.title;
+      const description = document.createElement("span");
+      description.textContent = `개설자 ${room.creatorName} · ${room.count}/${room.maxPlayers}명`;
+      details.append(title, description);
+      const join = document.createElement("button");
+      join.type = "button";
+      join.className = "room-join";
+      join.dataset.roomId = room.roomId;
+      const isFull = room.count >= room.maxPlayers;
+      join.disabled = isFull || !currentSocket.connected || requestPending;
+      join.textContent = isFull ? "정원 마감" : "입장";
+      join.setAttribute("aria-label", `${room.title} ${join.textContent}`);
+      row.append(details, join);
+      return row;
+    });
+    roomList.replaceChildren(...rows);
+    roomListEmpty.hidden = rows.length > 0;
+    roomListEmpty.textContent = currentSocket.connected ? "대기 중인 방이 없습니다." : "서버에 연결 중입니다…";
+    const pageLabel = `${roomPage + 1} / ${pageCount} 페이지`;
+    if (pageStatus.textContent !== pageLabel) pageStatus.textContent = pageLabel;
+    pagination.hidden = pageCount <= 1;
+    previousPage.disabled = roomPage === 0;
+    nextPage.disabled = roomPage >= pageCount - 1;
+    if (focusedRoom) {
+      Array.from(roomList.querySelectorAll("button")).find((button) =>
+        button.dataset.roomId === focusedRoom && !button.disabled)?.focus();
+    }
+  };
+  previousPage.addEventListener("click", () => {
+    roomPage -= 1;
+    renderRoomList();
+  });
+  nextPage.addEventListener("click", () => {
+    roomPage += 1;
+    renderRoomList();
+  });
+  const setActions = (disabled: boolean) => {
+    requestPending = disabled;
+    setLobbyButtons(root, disabled || !currentSocket.connected);
+    renderRoomList();
+  };
+  const onRoomList = (rooms: LobbyRoom[]) => {
+    if (generation !== screenGeneration || leavingToMain) return;
+    publicRooms.clear();
+    rooms.forEach((room) => publicRooms.set(room.roomId, room));
+    renderRoomList();
+  };
+  const onLobbyRoom = ({ roomId, room }: { roomId: string; room?: LobbyRoom }) => {
+    if (generation !== screenGeneration || leavingToMain) return;
+    if (room) publicRooms.set(roomId, room);
+    else publicRooms.delete(roomId);
+    renderRoomList();
+  };
+  currentSocket.on("lobby:rooms", onRoomList);
+  currentSocket.on("lobby:room", onLobbyRoom);
   const cancel = root.querySelector<HTMLButtonElement>("#main-cancel")!;
-  const leaveAndReturnToMain = () => {
+  const leave = (returnToLobby: boolean) => {
     if (leavingToMain) return;
     leavingToMain = true;
     clearNavigationTimer();
     clearSession();
     roomSession = undefined;
-    const targetRoomId = roomCode;
+    const targetRoomId = currentRoomId;
+    let completed = false;
+    const finish = () => {
+      if (completed || generation !== screenGeneration) return;
+      completed = true;
+      clearNavigationTimer();
+      if (returnToLobby) showMultiplayer(root);
+      else showLobby();
+    };
     if (currentSocket.connected && targetRoomId) {
-      currentSocket.emit("room:leave", { roomId: targetRoomId }, () => {});
+      navigationTimer = window.setTimeout(finish, 800);
+      currentSocket.emit("room:leave", { roomId: targetRoomId }, finish);
     } else {
-      showLobby();
-      return;
+      finish();
     }
-    navigationTimer = window.setTimeout(() => {
-      navigationTimer = undefined;
-      if (generation === screenGeneration) showLobby();
-    }, 800);
   };
-  cancel.addEventListener("click", leaveAndReturnToMain);
-  root.querySelector("#waiting-leave")?.addEventListener("click", leaveAndReturnToMain);
+  const leaveAndReturnToLobby = () => leave(true);
+  cancel.addEventListener("click", () => leave(false));
+  root.querySelector("#waiting-leave")?.addEventListener("click", leaveAndReturnToLobby);
   currentSocket.on("connect", () => {
+    if (generation !== screenGeneration || leavingToMain) return;
+    if (screen === "waiting") currentSocket.emit("lobby:watch");
     const session = roomSession
       ? {
           roomId: roomSession.roomId,
@@ -267,7 +363,8 @@ function showMultiplayer(root: HTMLElement, nickname: string) {
         }
       : readSession();
     if (session?.roomId && session.reconnectToken) {
-      roomCode = session.roomId;
+      setActions(true);
+      currentRoomId = session.roomId;
       roomSession = {
         roomId: session.roomId,
         playerId: session.playerId,
@@ -290,8 +387,8 @@ function showMultiplayer(root: HTMLElement, nickname: string) {
             roomSession = undefined;
             clearSession();
             status.textContent = result?.error || "재접속 세션이 만료되었습니다.";
-            requestPending = false;
-            setLobbyButtons(root, false);
+            currentRoomId = "";
+            setActions(false);
             return;
           }
           roomSession = {
@@ -311,14 +408,16 @@ function showMultiplayer(root: HTMLElement, nickname: string) {
         },
       );
     } else {
-      status.textContent = "방을 만들거나 방 코드를 입력하세요.";
-      setLobbyButtons(root, requestPending);
+      status.textContent = "";
+      setActions(false);
     }
   });
   currentSocket.on("disconnect", () => {
-    if (generation === screenGeneration && screen === "waiting") {
+    if (generation === screenGeneration && screen === "waiting" && !leavingToMain) {
       requestPending = false;
       setLobbyButtons(root, true);
+      publicRooms.clear();
+      renderRoomList();
       status.textContent = "서버 연결이 끊겼습니다. 다시 연결하는 중입니다…";
     }
   });
@@ -336,20 +435,18 @@ function showMultiplayer(root: HTMLElement, nickname: string) {
   });
   const onCreated = (room: {
     roomId: string;
-    count: number;
     playerId: number;
     reconnectToken: string;
   }) => {
     if (generation !== screenGeneration || leavingToMain) return;
-    roomCode = room.roomId;
+    currentRoomId = room.roomId;
     roomSession = { roomId: room.roomId, playerId: room.playerId, token: room.reconnectToken };
     saveSession(room.roomId, room.playerId, room.reconnectToken);
-    status.textContent = `방 코드: ${roomCode} · ${room.count}명 입장 대기 중`;
   };
   const onRoomUpdate = (room: WaitingRoomUpdate) => {
     if (generation !== screenGeneration || screen !== "waiting" || leavingToMain) return;
     latestWaitingRoomUpdate = room;
-    roomCode = room.roomId;
+    currentRoomId = room.roomId;
     renderWaitingRoom(root, currentSocket, room, status);
   };
   const onStart = (data: GameStartPayload) => {
@@ -374,16 +471,16 @@ function showMultiplayer(root: HTMLElement, nickname: string) {
       socket: currentSocket,
       onAbort: () => {
         if (generation === screenGeneration && screen === "playing") {
-          showWaiting(root, currentSocket, roomCode, generation, leaveAndReturnToMain);
+          showWaiting(root, currentSocket, currentRoomId, generation, leaveAndReturnToLobby, latestWaitingRoomUpdate);
         }
       },
-      onExit: leaveAndReturnToMain,
+      onExit: leaveAndReturnToLobby,
     });
   };
   const onError = (message: string) => {
-    if (generation === screenGeneration) status.textContent = message;
-    requestPending = false;
-    setLobbyButtons(root, false);
+    if (generation !== screenGeneration || leavingToMain) return;
+    status.textContent = message;
+    setActions(false);
   };
   currentSocket.on("room:created", onCreated);
   currentSocket.on("room:update", onRoomUpdate);
@@ -394,39 +491,48 @@ function showMultiplayer(root: HTMLElement, nickname: string) {
     currentSocket.off("room:update", onRoomUpdate);
     currentSocket.off("game:start", onStart);
     currentSocket.off("game:error", onError);
+    currentSocket.off("lobby:rooms", onRoomList);
+    currentSocket.off("lobby:room", onLobbyRoom);
+    currentSocket.emit("lobby:unwatch");
     currentSocket.io.off("reconnect_attempt", onReconnectAttempt);
   };
   currentSocket.connect();
-  root.querySelector("#create")?.addEventListener("click", () => {
+  root.querySelector<HTMLFormElement>("#create-room")?.addEventListener("submit", (event) => {
+    event.preventDefault();
     if (!currentSocket.connected || requestPending) return;
-    requestPending = true;
-    setLobbyButtons(root, true);
+    const form = new FormData(event.currentTarget as HTMLFormElement);
+    const title = String(form.get("title") ?? "").trim();
+    if (!title) {
+      status.textContent = "방 제목을 입력해 주세요.";
+      return;
+    }
+    setActions(true);
     currentSocket.emit(
       "room:create",
-      { maxPlayers: Number(inputValue(root, "#count", "2")) },
+      { title, maxPlayers: Number(form.get("count")) },
       (result: { ok: boolean; error?: string; playerId?: number; reconnectToken?: string }) => {
         if (!result?.ok) onError(result?.error || "방 생성에 실패했습니다.");
       },
     );
   });
-  root.querySelector("#join-form")?.addEventListener("submit", (event) => {
-    event.preventDefault();
+  roomList.addEventListener("click", (event) => {
+    const join = (event.target as HTMLElement).closest<HTMLButtonElement>(".room-join");
+    const targetRoomId = join?.dataset.roomId;
+    if (!targetRoomId || join.disabled) return;
     if (!currentSocket.connected || requestPending) return;
-    roomCode = inputValue(root, "#room", "").toUpperCase();
-    requestPending = true;
-    setLobbyButtons(root, true);
+    setActions(true);
     currentSocket.emit(
       "room:join",
-      { roomId: roomCode },
+      { roomId: targetRoomId },
       (result: { ok: boolean; playerId?: number; reconnectToken?: string; error?: string }) => {
         if (generation !== screenGeneration || leavingToMain) return;
         if (result?.ok && result.playerId !== undefined && result.reconnectToken) {
           roomSession = {
-            roomId: roomCode,
+            roomId: targetRoomId,
             playerId: result.playerId,
             token: result.reconnectToken,
           };
-          saveSession(roomCode, result.playerId, result.reconnectToken);
+          saveSession(targetRoomId, result.playerId, result.reconnectToken);
           if (latestWaitingRoomUpdate) onRoomUpdate(latestWaitingRoomUpdate);
         } else onError(result?.error || "방 참여에 실패했습니다.");
       },
@@ -438,10 +544,9 @@ function waitingPanel(hidden = false) {
   return `
     <section id="waiting-panel" class="panel" aria-label="대기방" ${hidden ? "hidden" : ""}>
       <div class="room-summary">
-        <div><span class="field-label">방 코드</span><strong id="waiting-code" class="room-code">—</strong></div>
+        <div><span class="field-label">방 제목</span><strong id="waiting-title" class="waiting-title">—</strong></div>
         <span id="waiting-count"></span>
       </div>
-      <p class="room-hint">친구에게 방 코드를 알려주세요.</p>
       <ul id="waiting-players" class="player-list" aria-label="참가자"></ul>
       <button id="lobby-start-button" type="button" hidden>게임 시작</button>
       <button id="waiting-leave" class="secondary-button" type="button">방 나가기</button>
@@ -458,7 +563,7 @@ function renderWaitingRoom(
   root.querySelector("#main-cancel")?.setAttribute("hidden", "");
   root.querySelector("#waiting-panel")?.removeAttribute("hidden");
   root.querySelector("h1")!.textContent = "대기방";
-  root.querySelector("#waiting-code")!.textContent = room.roomId;
+  root.querySelector("#waiting-title")!.textContent = room.title;
   root.querySelector("#waiting-count")!.textContent = `${room.count} / ${room.maxPlayers}명`;
   const players = (room.players ?? []).map((player) => {
     const row = document.createElement("li");
@@ -502,7 +607,6 @@ function showWaiting(
   root.innerHTML = `<main class="lobby"><div class="flow"><h1>대기방</h1>
     ${waitingPanel()}<p id="lobby-status" class="status" role="status">대기방 정보를 불러오는 중입니다…</p>
     </div></main>`;
-  root.querySelector("#waiting-code")!.textContent = roomId;
   let disposed = false;
   root.querySelector("#waiting-leave")?.addEventListener("click", () => {
     dispose();
@@ -558,14 +662,10 @@ function showWaiting(
 
 function setLobbyButtons(root: HTMLElement, disabled: boolean) {
   root
-    .querySelectorAll<HTMLButtonElement>("#create, #join, #lobby-start-button")
+    .querySelectorAll<HTMLButtonElement>("#create, #lobby-start-button")
     .forEach((button) => {
       button.disabled = disabled;
     });
-}
-
-function inputValue(root: HTMLElement, selector: string, fallback: string) {
-  return (root.querySelector(selector) as HTMLInputElement | HTMLSelectElement)?.value || fallback;
 }
 
 function saveSession(roomId: string, playerId: number, token: string) {
@@ -735,13 +835,4 @@ function start(settings: GameSettings, showGuide = true) {
     onExit: () => leaveRound(onExit),
     onAbort: onAbort ? () => leaveRound(onAbort) : undefined,
   });
-}
-
-function escapeHtml(value: string) {
-  return value.replace(
-    /[&<>"']/g,
-    (character) =>
-      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character] ??
-      character,
-  );
 }

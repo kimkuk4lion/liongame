@@ -21,6 +21,7 @@ const io = new Server(httpServer, {
   pingTimeout: 30_000,
 });
 const rooms = new Map();
+const publicLobby = "multiplayer-lobby";
 const socketRooms = new Map();
 const TURN_LIMITS = { easy: 15_000, normal: 10_000, hard: 6_000 };
 const RECONNECT_GRACE_MS = 30_000;
@@ -87,11 +88,19 @@ function firstContactOnSegment(startX, startY, endX, endY, pointX, pointY, radiu
   return { t: clampedT, x: contactX, y: contactY };
 }
 
-function roomSummary(roomId, room) {
+function lobbyEntry(roomId, room) {
   return {
     roomId,
+    title: room.title,
     count: room.players.length,
     maxPlayers: room.maxPlayers,
+    creatorName: room.creatorName,
+  };
+}
+
+function roomSummary(roomId, room) {
+  return {
+    ...lobbyEntry(roomId, room),
     hostId: room.hostId,
     status: room.status,
     rematchReady: canRematch(room),
@@ -121,6 +130,7 @@ function gameStartData(roomId, room, player) {
 }
 
 function startRound(roomId, room) {
+  if (room.status === "waiting") io.to(publicLobby).emit("lobby:room", { roomId });
   resetGameState(room);
   room.status = "playing";
   for (const player of room.practiceMemberId ? room.players.slice(0, 1) : room.players) {
@@ -132,6 +142,14 @@ function publish(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
   io.to(roomId).emit("room:update", roomSummary(roomId, room));
+  if (room.status === "waiting") {
+    io.to(publicLobby).emit("lobby:room", { roomId, room: lobbyEntry(roomId, room) });
+  }
+}
+
+function removeRoom(roomId, room) {
+  rooms.delete(roomId);
+  if (room.status === "waiting") io.to(publicLobby).emit("lobby:room", { roomId });
 }
 
 function emitError(socket, message, ack) {
@@ -362,7 +380,7 @@ function markDisconnected(socket, requestedRoom) {
       room.players = room.players.filter((candidate) => candidate.id !== player.id);
       player.reconnectToken = undefined;
       if (room.hostId === player.id) room.hostId = room.players.find((candidate) => candidate.status !== "eliminated")?.id;
-      if (room.players.every((candidate) => candidate.status === "eliminated")) rooms.delete(id);
+      if (room.players.every((candidate) => candidate.status === "eliminated")) removeRoom(id, room);
       else publish(id);
       return;
     }
@@ -395,7 +413,7 @@ function leaveRoom(socket, requestedRoom) {
   }
   room.players = room.players.filter((candidate) => candidate.id !== player.id);
   player.reconnectToken = undefined;
-  if (room.players.every((candidate) => candidate.status === "eliminated")) rooms.delete(id);
+  if (room.players.every((candidate) => candidate.status === "eliminated")) removeRoom(id, room);
   else {
     if (!room.players.some((candidate) => candidate.id === room.hostId))
       room.hostId = room.players.find((candidate) => candidate.status !== "eliminated")?.id;
@@ -423,6 +441,16 @@ io.use((socket, next) => {
 });
 
 io.on("connection", (socket) => {
+  socket.on("lobby:watch", () => {
+    if (socket.rooms.has(publicLobby)) return;
+    socket.join(publicLobby);
+    const entries = [];
+    for (const [roomId, room] of rooms) {
+      if (room.status === "waiting") entries.push(lobbyEntry(roomId, room));
+    }
+    socket.emit("lobby:rooms", entries);
+  });
+  socket.on("lobby:unwatch", () => socket.leave(publicLobby));
   const rateBuckets = {
     create: [],
     join: [],
@@ -463,6 +491,9 @@ io.on("connection", (socket) => {
       return emitError(socket, "요청이 너무 많습니다. 잠시 후 다시 시도하세요.", ack);
     if (socketRooms.has(socket.id)) return emitError(socket, "먼저 현재 방에서 나가세요.", ack);
     const maxPlayers = Number(payload?.maxPlayers);
+    const title = typeof payload?.title === "string" ? payload.title.trim() : "";
+    if (!title || title.length > 40 || /[\p{Cc}]/u.test(title))
+      return emitError(socket, "방 제목은 1~40자로 입력해 주세요.", ack);
     if (
       !Number.isInteger(maxPlayers) ||
       maxPlayers < 2 ||
@@ -488,6 +519,8 @@ io.on("connection", (socket) => {
       reconnectToken: randomBytes(32).toString("hex"),
     };
     const room = {
+      title,
+      creatorName: player.name,
       hostId: 0,
       maxPlayers,
       status: "waiting",
