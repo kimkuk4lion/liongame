@@ -16,7 +16,6 @@ export class Game extends Scene {
   private latestVersion = 0;
   private aborted = false;
   private abortTimer: number | undefined;
-  private finishClickArmed = false;
   private readonly cleanup: (() => void)[] = [];
 
   constructor() {
@@ -47,36 +46,39 @@ export class Game extends Scene {
     const labels: Phaser.GameObjects.Text[] = [];
     const description = this.add
       .text(18, 18, "", {
-        color: "#241b12",
+        color: "#f7f1df",
         fontSize: 22,
         fontStyle: "bold",
-        backgroundColor: "#ffffffcc",
+        backgroundColor: "#192c25",
         padding: { x: 10, y: 8 },
       })
       .setDepth(10);
     const powerText = this.add
       .text(18, 86, "힘: 0%", {
-        color: "#241b12",
+        color: "#f1cc83",
         fontSize: 18,
-        backgroundColor: "#ffffffcc",
+        backgroundColor: "#192c25",
         padding: { x: 8, y: 5 },
       })
       .setDepth(10);
     const backButton = this.add.container(516, 38).setDepth(20);
     const backBackground = this.add
-      .rectangle(0, 0, 140, 46, 0xf5c778, 1)
-      .setStrokeStyle(2, 0xd8934d)
+      .rectangle(0, 0, 140, 46, 0xf1cc83, 1)
+      .setStrokeStyle(2, 0x78663f)
       .setInteractive({ useHandCursor: true });
     const backLabel = this.add
       .text(0, 0, "메인으로", {
-        color: "#2b160d",
+        color: "#1c251d",
         fontSize: 18,
         fontStyle: "bold",
       })
       .setOrigin(0.5);
     backButton.add([backBackground, backLabel]);
     backBackground.on("pointerdown", () => {
-      if (window.confirm("게임을 나가면 현재 플레이어는 탈락 처리됩니다. 메인으로 이동할까요?"))
+      if (
+        this.settings.mode === "practice" ||
+        window.confirm("게임을 나가면 현재 플레이어는 탈락 처리됩니다. 메인으로 이동할까요?")
+      )
         this.settings.onExit?.();
     });
     const guideLine = this.add
@@ -395,7 +397,7 @@ export class Game extends Scene {
     powerText.setText(`힘: ${currentPower}%`);
     description.setText(
       args.winner
-        ? `${args.winner.name}님이 우승하였습니다!\n클릭하면 스코어보드를 확인합니다.`
+        ? `${args.winner.name}님이 우승했습니다!`
         : args.state === "paused"
           ? "연결이 끊긴 플레이어를 기다리는 중입니다."
           : current
@@ -419,17 +421,7 @@ export class Game extends Scene {
       }
     });
 
-    if (args.winner && !this.children.getByName("scoreboard")) {
-      if (!this.finishClickArmed) {
-        this.finishClickArmed = true;
-        this.input.once("pointerdown", () => {
-          this.finishClickArmed = false;
-          if (!this.children.getByName("scoreboard")) this.showScoreboard(args.marbles);
-        });
-      }
-    } else if (!args.winner) {
-      this.finishClickArmed = false;
-    }
+    if (args.winner && !this.children.getByName("scoreboard")) this.showScoreboard(args.marbles);
   }
 
   private showScoreboard(marbles: Marble[]) {
@@ -438,11 +430,11 @@ export class Game extends Scene {
       .map((marble, index) => `${index + 1}. ${marble.name}  ${marble.score}점`)
       .join("\n");
     this.add
-      .text(300, 650, `스코어보드\n\n${board}`, {
-        color: "#25170d",
+      .text(300, 650, `최종 순위\n\n${board}`, {
+        color: "#f7f1df",
         fontSize: 28,
         align: "center",
-        backgroundColor: "#fffbeeee",
+        backgroundColor: "#192c25",
         padding: { x: 24, y: 20 },
       })
       .setName("scoreboard")
