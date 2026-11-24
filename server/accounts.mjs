@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto";
-import pg from "pg";
+import { PrismaPg } from "@prisma/adapter-pg";
+import { PrismaClient } from "./generated/prisma/client.mts";
 
 const sessionSeconds = 30 * 24 * 60 * 60;
 const loginSeconds = 600;
@@ -34,10 +35,14 @@ async function readJson(req) {
 export async function createAccounts({
   env = process.env,
   fetchProvider = fetch,
-  pool = env.DATABASE_URL ? new pg.Pool({
-    connectionString: env.DATABASE_URL,
-    connectionTimeoutMillis: 5000,
-    statement_timeout: 5000,
+  db = env.DATABASE_URL ? new PrismaClient({
+    adapter: new PrismaPg({
+      connectionString: env.DATABASE_URL,
+      connectionTimeoutMillis: 5000,
+      statement_timeout: 5000,
+    }, {
+      onPoolError: () => console.error("PostgreSQL connection error"),
+    }),
   }) : undefined,
 } = {}) {
   const configuredUrl = env.APP_URL?.trim();
@@ -48,30 +53,18 @@ export async function createAccounts({
   }
   const redirectUri = env.KAKAO_REDIRECT_URI;
   const kakaoKey = env.KAKAO_REST_API_KEY;
-  const loginEnabled = Boolean(appUrl && pool && kakaoKey && redirectUri);
+  const loginEnabled = Boolean(appUrl && db && kakaoKey && redirectUri);
   const secure = appUrl?.protocol === "https:" || Boolean(redirectUri?.startsWith("https:"));
   const sessionCookie = secure ? "__Host-lion_session" : "lion_session";
   const stateCookie = secure ? "__Host-lion_state" : "lion_state";
-  pool?.on?.("error", () => console.error("PostgreSQL connection error"));
-  await pool?.query(`
-    CREATE TABLE IF NOT EXISTS lion_members (
-      id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-      kakao_id text NOT NULL UNIQUE,
-      nickname text NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS lion_sessions (
-      token_hash text PRIMARY KEY,
-      member_id bigint NOT NULL REFERENCES lion_members(id) ON DELETE CASCADE,
-      expires_at timestamptz NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS lion_results (
-      round_id uuid PRIMARY KEY,
-      member_id bigint NOT NULL REFERENCES lion_members(id) ON DELETE CASCADE,
-      mode text NOT NULL CHECK (mode IN ('practice', 'multi')),
-      score integer NOT NULL CHECK (score >= 0)
-    );
-    CREATE INDEX IF NOT EXISTS lion_results_mode_member ON lion_results (mode, member_id);
-  `);
+  try {
+    await db?.member.findFirst({ select: { id: true } });
+  } catch (error) {
+    if (error.code === "P2021") {
+      throw new Error("Database tables are missing. Run npm run db:deploy before starting the server.", { cause: error });
+    }
+    throw error;
+  }
 
   function getCookie(req, name) {
     return req.headers.cookie?.split(";").map((part) => part.trim())
@@ -102,13 +95,12 @@ export async function createAccounts({
 
   async function member(req) {
     const session = getCookie(req, sessionCookie);
-    if (!pool || !isToken(session)) return null;
-    const { rows } = await pool.query(
-      `SELECT m.id, m.nickname FROM lion_sessions s JOIN lion_members m ON m.id = s.member_id
-       WHERE s.token_hash = $1 AND s.expires_at > now()`,
-      [hash(session)],
-    );
-    return rows[0] ?? null;
+    if (!db || !isToken(session)) return null;
+    const current = await db.loginSession.findUnique({
+      where: { tokenHash: hash(session), expiresAt: { gt: new Date() } },
+      select: { member: { select: { id: true, nickname: true } } },
+    });
+    return current?.member ?? null;
   }
 
   async function kakaoCallback(req, res, url) {
@@ -141,21 +133,27 @@ export async function createAccounts({
     );
     const kakaoId = String(info.id ?? "");
     if (!/^\d{1,20}$/.test(kakaoId)) return loginResult(res, "failed");
-    const { rows } = await pool.query(
-      `INSERT INTO lion_members (kakao_id, nickname) VALUES ($1, $2)
-       ON CONFLICT (kakao_id) DO UPDATE SET kakao_id = EXCLUDED.kakao_id RETURNING id`,
-      [kakaoId, randomNickname()],
-    );
+    const account = await db.member.upsert({
+      where: { kakaoId },
+      create: { kakaoId, nickname: randomNickname() },
+      update: { kakaoId },
+      select: { id: true },
+    });
     const session = token();
     const previous = getCookie(req, sessionCookie);
-    await pool.query(
-      `WITH expired AS (
-         DELETE FROM lion_sessions WHERE expires_at <= now() OR token_hash = $4
-       )
-       INSERT INTO lion_sessions (token_hash, member_id, expires_at)
-       VALUES ($1, $2, now() + $3 * interval '1 second')`,
-      [hash(session), rows[0].id, sessionSeconds, isToken(previous) ? hash(previous) : null],
-    );
+    const now = new Date();
+    const obsolete = [{ expiresAt: { lte: now } }];
+    if (isToken(previous)) obsolete.push({ tokenHash: hash(previous) });
+    await db.$transaction([
+      db.loginSession.deleteMany({ where: { OR: obsolete } }),
+      db.loginSession.create({
+        data: {
+          tokenHash: hash(session),
+          memberId: account.id,
+          expiresAt: new Date(now.getTime() + sessionSeconds * 1000),
+        },
+      }),
+    ]);
     loginResult(res, undefined, session);
   }
 
@@ -198,20 +196,24 @@ export async function createAccounts({
       if (!/^[\p{L}\p{N}]{2,10}$/u.test(nickname)) {
         return json(res, 400, { error: "닉네임은 문자와 숫자로 2~10자까지 입력해 주세요." });
       }
-      const { rows } = await pool.query(
-        `UPDATE lion_members m SET nickname = $1 FROM lion_sessions s
-         WHERE m.id = s.member_id AND s.token_hash = $2 AND s.expires_at > now()
-         RETURNING m.nickname`,
-        [nickname, hash(getCookie(req, sessionCookie))],
-      );
+      const rows = await db.member.updateManyAndReturn({
+        where: {
+          id: account.id,
+          sessions: {
+            some: { tokenHash: hash(getCookie(req, sessionCookie)), expiresAt: { gt: new Date() } },
+          },
+        },
+        data: { nickname },
+        select: { nickname: true },
+      });
       if (!rows[0]) return json(res, 401, { error: "로그인 세션이 만료되었습니다." });
       return json(res, 200, rows[0]);
     }
     if (req.method === "POST" && url.pathname === "/api/auth/logout") {
       if (!appUrl || req.headers.origin !== appUrl.origin) return json(res, 403, { error: "허용되지 않은 요청입니다." });
       const session = getCookie(req, sessionCookie);
-      if (pool && isToken(session)) {
-        await pool.query("DELETE FROM lion_sessions WHERE token_hash = $1", [hash(session)]);
+      if (db && isToken(session)) {
+        await db.loginSession.deleteMany({ where: { tokenHash: hash(session) } });
       }
       res.setHeader("Set-Cookie", cookie(sessionCookie, "", 0));
       return json(res, 200, { ok: true });
@@ -219,17 +221,16 @@ export async function createAccounts({
     if (req.method === "GET" && url.pathname === "/api/leaderboard") {
       const mode = url.searchParams.get("mode");
       if (mode !== "practice" && mode !== "multi") return json(res, 400, { error: "게임 모드를 선택해 주세요." });
-      if (!pool) return json(res, 503, { error: "순위표 데이터베이스가 연결되지 않았습니다." });
-      const { rows } = await pool.query(
-        `WITH totals AS (
-           SELECT member_id, CASE WHEN $1 = 'practice' THEN max(score) ELSE count(*) END AS value
-           FROM lion_results WHERE mode = $1 GROUP BY member_id
-         )
-         SELECT dense_rank() OVER (ORDER BY value DESC) AS rank, m.nickname, value
-         FROM totals JOIN lion_members m ON m.id = totals.member_id
-         ORDER BY value DESC, totals.member_id LIMIT 10`,
-        [mode],
-      );
+      if (!db) return json(res, 503, { error: "순위표 데이터베이스가 연결되지 않았습니다." });
+      const rows = await db.$queryRaw`
+        WITH totals AS (
+          SELECT member_id, CASE WHEN ${mode} = 'practice' THEN max(score) ELSE count(*) END AS value
+          FROM lion_results WHERE mode = ${mode} GROUP BY member_id
+        )
+        SELECT dense_rank() OVER (ORDER BY value DESC) AS rank, m.nickname, value
+        FROM totals JOIN lion_members m ON m.id = totals.member_id
+        ORDER BY value DESC, totals.member_id LIMIT 10
+      `;
       return json(res, 200, { entries: rows.map(({ rank, nickname, value }) => ({
         rank: Number(rank), nickname, value: Number(value),
       })) });
@@ -238,12 +239,11 @@ export async function createAccounts({
   }
 
   async function record(roundId, memberId, mode, score) {
-    if (!pool || !memberId) return;
-    await pool.query(
-      `INSERT INTO lion_results (round_id, member_id, mode, score) VALUES ($1, $2, $3, $4)
-       ON CONFLICT (round_id) DO NOTHING`,
-      [roundId, memberId, mode, score],
-    );
+    if (!db || !memberId) return;
+    await db.matchResult.createMany({
+      data: { roundId, memberId, mode, score },
+      skipDuplicates: true,
+    });
   }
 
   return { handle, member, record };

@@ -32,7 +32,7 @@ Liongame은 Phaser 기반의 웹 구슬 게임입니다. 혼자 연습하거나,
 | 게임 클라이언트 | Phaser 3, TypeScript |
 | 빌드·개발 서버 | Vite 6 |
 | 실시간 통신 | Socket.IO 4 (클라이언트·서버) |
-| 데이터베이스 | PostgreSQL |
+| 데이터베이스 | PostgreSQL, Prisma ORM |
 | 서버 런타임 | Node.js (운영 CI: 24) |
 | 프론트엔드 배포 | Vite 정적 빌드 (`docs/`) |
 | CI/CD | GitHub Actions, SSH, rsync |
@@ -43,7 +43,7 @@ Liongame은 Phaser 기반의 웹 구슬 게임입니다. 혼자 연습하거나,
 ### 요구 환경
 
 - Git
-- Node.js 및 npm (Node.js 24 권장: 배포 워크플로와 동일)
+- Node.js 22.12 이상 및 npm (운영과 배포 워크플로는 Node.js 24 권장)
 
 ### 설치
 
@@ -102,7 +102,18 @@ DATABASE_URL=
 
 카카오 개발자 콘솔에서 카카오 로그인을 활성화하고 `KAKAO_REDIRECT_URI`와 일치하는 주소를 등록합니다. 로컬에서는 게임과 콜백 모두 `localhost` 주소를 사용하세요. 카카오 로그인에서 이메일 동의 화면을 없애려면 카카오 개발자 콘솔에서도 **카카오계정(이메일)** 동의항목을 사용 안 함으로 설정합니다. 최초 가입 시 한글 단어 4글자와 숫자 4자리로 닉네임을 생성합니다. 마이페이지에서 닉네임을 변경할 수 있으며 순위표에는 게임 닉네임이 표시됩니다. [카카오 로그인 설정](https://developers.kakao.com/docs/ko/kakaologin/prerequisite)
 
-PostgreSQL에 애플리케이션용 데이터베이스와 사용자를 만든 뒤 `DATABASE_URL`을 입력합니다. 서버는 시작할 때 필요한 테이블을 생성합니다. 연습과 멀티플레이에는 카카오 로그인이 필요하며 계정 닉네임을 사용합니다. 순위표에는 연습 최고 점수와 멀티플레이 승리 횟수 기준으로 각각 상위 10명이 표시됩니다.
+PostgreSQL에 애플리케이션용 데이터베이스와 사용자를 만든 뒤 `DATABASE_URL`을 입력합니다. 비어 있는 데이터베이스는 서버를 시작하기 전에 `npm run db:deploy`로 초기 마이그레이션을 적용합니다. 연습과 멀티플레이에는 카카오 로그인이 필요하며 계정 닉네임을 사용합니다. 순위표에는 연습 최고 점수와 멀티플레이 승리 횟수 기준으로 각각 상위 10명이 표시됩니다.
+
+### 기존 데이터베이스에 Prisma 적용
+
+기존 게임 서버가 만든 `lion_members`, `lion_sessions`, `lion_results` 테이블을 사용하는 경우, 먼저 데이터베이스를 백업하고 현재 구조를 [초기 마이그레이션](prisma/migrations/0_init/migration.sql)과 대조합니다. 초기 마이그레이션에 적힌 테이블과 제약 조건이 이미 있으면 해당 마이그레이션을 적용된 상태로 한 번만 등록합니다. 이전에 추가한 nullable 컬럼도 이 등록 과정에서 보존됩니다.
+
+```powershell
+npx prisma migrate resolve --applied 0_init
+npm run db:deploy
+```
+
+Prisma CLI는 `.env.development`의 `DATABASE_URL`을 우선 사용하고, 해당 항목이 없으면 `.env`를 사용합니다. `NODE_ENV=production`에서는 `.env.production`을 사용합니다. 프로세스 환경에 직접 지정한 `DATABASE_URL`이 가장 우선합니다. `npm run db:studio`로 연결된 데이터베이스의 회원과 경기 기록을 확인할 수 있습니다.
 
 ### 로컬 실행
 
@@ -130,6 +141,8 @@ npm run dev
 | `npm run server` | `.env`와 선택적인 `.env.development`를 읽어 서버 실행 |
 | `npm run typecheck` | TypeScript 타입 검사 |
 | `npm run build` | 프로덕션 정적 빌드 (`docs/` 출력) |
+| `npm run db:deploy` | 대기 중인 Prisma 마이그레이션 적용 |
+| `npm run db:studio` | Prisma Studio 열기 |
 | `npm run server:prod` | `.env`와 선택적인 `.env.production`을 읽어 서버 실행 |
 
 `server` / `server:prod` 명령은 Node.js의 `--env-file` 옵션을 사용하므로 해당 옵션을 지원하는 Node.js 버전이 필요합니다.
@@ -153,8 +166,8 @@ npm run dev
 1. GitHub Actions(ubuntu-24.04)에서 Node.js 24 구성
 2. `npm ci` 및 `npm run typecheck` 실행
 3. `VITE_SOCKET_URL=https://game.cloudxt.app`으로 `npm run build` 실행
-4. 빌드 결과(`docs/`), 서버 코드(`server/`), 패키지 파일을 SSH/rsync로 `/var/www/liongame`에 전송
-5. 배포 서버에서 운영 의존성 설치 후 `liongame-server` PM2 프로세스 재시작·저장
+4. 빌드 결과(`docs/`), 서버 코드(`server/`), Prisma 설정과 마이그레이션, 패키지 파일을 SSH/rsync로 `/var/www/liongame`에 전송
+5. 배포 서버에서 운영 의존성을 설치하고 Prisma Client를 생성한 뒤 `liongame-server` PM2 프로세스를 재시작
 
 GitHub Actions에 필요한 Secrets:
 
@@ -166,6 +179,8 @@ GitHub Actions에 필요한 Secrets:
 | `SSH_KNOWN_HOSTS` | 서버 호스트키 검증 정보 |
 
 > **운영 환경 유의사항:** 현재 워크플로는 `.env.production`을 서버로 복사하지 않습니다. 서버 측 설정 파일과 PM2의 환경변수 로딩 방식은 별도로 구성해야 합니다. `pm2 restart --update-env`만으로 `.env.production`을 자동으로 읽는 것은 아닙니다.
+
+Prisma를 처음 배포하기 전 운영 DB에 초기 마이그레이션을 등록하거나 적용합니다. 이후 스키마가 변경되는 릴리스도 서버 재시작 전에 대상 DB에 마이그레이션을 적용합니다.
 
 ### 운영 환경변수 예시
 

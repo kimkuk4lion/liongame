@@ -12,16 +12,27 @@
     "dev": "vite --config vite/config.dev.mjs --host",
     "build": "vite build --config vite/config.prod.mjs",
     "typecheck": "tsc --noEmit",
-    "server": "node --env-file-if-exists=.env --env-file-if-exists=.env.development server/socket-server.mjs",
-    "server:prod": "node --env-file-if-exists=.env --env-file-if-exists=.env.production server/socket-server.mjs"
+    "postinstall": "prisma generate",
+    "db:deploy": "prisma migrate deploy",
+    "db:studio": "prisma studio",
+    "server": "node --experimental-strip-types --env-file-if-exists=.env --env-file-if-exists=.env.development server/socket-server.mjs",
+    "server:prod": "node --experimental-strip-types --env-file-if-exists=.env --env-file-if-exists=.env.production server/socket-server.mjs"
   },
   "devDependencies": {
     "typescript": "~5.7.2",
     "vite": "^6.3.1"
   },
+  "overrides": {
+    "@prisma/config": {
+      "effect": "3.22.1"
+    }
+  },
   "dependencies": {
+    "@prisma/adapter-pg": "7.10.1",
+    "@prisma/client": "7.10.1",
     "pg": "^8.23.1",
     "phaser": "^3.90.0",
+    "prisma": "7.10.1",
     "socket.io": "^4.8.4",
     "socket.io-client": "^4.8.4",
     "terser": "^5.39.0"
