@@ -108,12 +108,12 @@ export class Game extends Scene {
         this.render(args, marbleImages, labels, description, guideLine);
       },
       this.settings.names,
-      this.settings.mode === "multi",
+      Boolean(this.settings.socket),
       (x, y) => this.showLionHit(x, y),
       TURN_SECONDS[this.settings.difficulty ?? "normal"],
     );
     this.system = system;
-    if (this.settings.mode === "multi" && this.settings.initialState) {
+    if (this.settings.socket && this.settings.initialState) {
       const initialState = this.settings.initialState as Parameters<System["applyServerState"]>[0];
       this.latestVersion = Math.max(this.latestVersion, initialState.version ?? 0);
       system.applyServerState(initialState);
@@ -136,8 +136,7 @@ export class Game extends Scene {
       this.cancelAim(aimLine, pullLine, trajectory, powerText);
       system.applyServerState(state);
     };
-    if (this.settings.mode === "multi") {
-      if (!this.settings.socket) return;
+    if (this.settings.socket) {
       this.socket = this.settings.socket;
       const onLionHit = (hit: { gameId: number; x: number; y: number }) => {
         if (hit.gameId === this.settings.gameId) this.showLionHit(hit.x, hit.y);
@@ -275,7 +274,7 @@ export class Game extends Scene {
         return;
       const { x, y, travel } = aimTarget(current, pointer);
       if (travel < 8) return;
-      if (this.settings.mode === "multi") {
+      if (this.socket) {
         const requestId = `${this.settings.gameId}-${this.settings.turnId}-${++this.requestSequence}`;
         this.socket?.emit(
           "game:move",

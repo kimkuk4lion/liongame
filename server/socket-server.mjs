@@ -1,12 +1,22 @@
 import { createServer } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Server } from "socket.io";
+import { createAccounts } from "./accounts.mjs";
 
 const port = Number(process.env.PORT) || 3001;
-const origins = (process.env.CORS_ORIGIN || "*").split(",").map((value) => value.trim());
-const httpServer = createServer();
+const origins = (process.env.CORS_ORIGIN ||
+  (process.env.APP_URL ? new URL(process.env.APP_URL).origin : "*"))
+  .split(",").map((value) => value.trim());
+const accounts = await createAccounts();
+const httpServer = createServer((req, res) => {
+  accounts.handle(req, res).catch(() => {
+    console.error("Game API request failed");
+    if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요." }));
+  });
+});
 const io = new Server(httpServer, {
-  cors: { origin: origins.length === 1 ? origins[0] : origins },
+  cors: { origin: origins.includes("*") ? "*" : origins, credentials: !origins.includes("*") },
   pingInterval: 25_000,
   pingTimeout: 30_000,
 });
@@ -37,14 +47,14 @@ const HOLES = [
   { x: 300, y: 150 },
 ];
 
-const validName = (value) =>
-  typeof value === "string" && value.trim().length > 0 && value.trim().length <= 10;
 const sessionTokenOf = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : "";
 const roomIdOf = (value) => {
   const roomId = typeof value === "string" ? value.trim() : "";
   return /^\d{4}$/.test(roomId) ? roomId : "";
 };
+const gameRoomIdOf = (value, socket) => socket.data.practiceRoom === value
+  ? socket.data.practiceRoom : roomIdOf(value);
 const finiteCoordinate = (value, min, max) =>
   Number.isFinite(value) && value >= min && value <= max;
 const validRequestId = (value) =>
@@ -113,7 +123,7 @@ function gameStartData(roomId, room, player) {
 function startRound(roomId, room) {
   resetGameState(room);
   room.status = "playing";
-  for (const player of room.players) {
+  for (const player of room.practiceMemberId ? room.players.slice(0, 1) : room.players) {
     io.to(player.socketId).emit("game:start", gameStartData(roomId, room, player));
   }
 }
@@ -169,6 +179,7 @@ function broadcastState(roomId, room, requestId) {
 }
 
 function resetGameState(room) {
+  room.roundId = randomUUID();
   room.gameId += 1;
   room.version = 0;
   room.turnId = 1;
@@ -214,8 +225,21 @@ function finishGame(roomId, room) {
   room.status = "finished";
   room.paused = false;
   room.moving = false;
-  room.state.winnerId = [...room.state.marbles].sort((a, b) => b.score - a.score)[0]?.id;
+  room.state.winnerId = room.state.marbles
+    .filter((marble) => !marble.eliminated)
+    .sort((a, b) => b.score - a.score)[0]?.id;
   room.deadline = 0;
+  const winner = room.state.marbles.find((marble) => marble.id === room.state.winnerId);
+  const winnerAccount = room.players.find((player) => player.id === winner?.id)?.memberId;
+  const memberId = room.practiceMemberId ?? winnerAccount;
+  if (memberId) {
+    const result = [room.roundId, memberId, room.practiceMemberId ? "practice" : "multi", winner?.score ?? 0];
+    accounts.record(...result).catch(() => {
+      setTimeout(() => accounts.record(...result).catch(() => {
+        console.error("Leaderboard result could not be saved");
+      }), 500).unref();
+    });
+  }
   if (!room.players.some((player) => player.id === room.hostId && player.status !== "eliminated")) {
     room.hostId = room.players.find((player) => player.status !== "eliminated")?.id;
   }
@@ -318,6 +342,11 @@ function pauseForDisconnect(roomId, room, player) {
 }
 
 function markDisconnected(socket, requestedRoom) {
+  if (socket.data.practiceRoom) {
+    rooms.delete(socket.data.practiceRoom);
+    socketRooms.delete(socket.id);
+    return;
+  }
   const id = roomIdOf(requestedRoom || socketRooms.get(socket.id));
   const room = rooms.get(id);
   const player = room?.players.find((candidate) => candidate.socketId === socket.id);
@@ -346,6 +375,13 @@ function markDisconnected(socket, requestedRoom) {
 }
 
 function leaveRoom(socket, requestedRoom) {
+  if (socket.data.practiceRoom === requestedRoom && requestedRoom) {
+    rooms.delete(requestedRoom);
+    socketRooms.delete(socket.id);
+    socket.leave(requestedRoom);
+    delete socket.data.practiceRoom;
+    return;
+  }
   const id = roomIdOf(requestedRoom || socketRooms.get(socket.id));
   const room = rooms.get(id);
   const player = room?.players.find((candidate) => candidate.socketId === socket.id);
@@ -374,6 +410,18 @@ setInterval(() => {
   }
 }, 250);
 
+io.use((socket, next) => {
+  if (!origins.includes("*") && socket.handshake.headers.origin &&
+      !origins.includes(socket.handshake.headers.origin)) {
+    return next(new Error("Origin not allowed"));
+  }
+  accounts.member(socket.request).then((member) => {
+    if (!member) return next(new Error("AUTH_REQUIRED"));
+    socket.data.member = member;
+    next();
+  }, () => next(new Error("Account service unavailable")));
+});
+
 io.on("connection", (socket) => {
   const rateBuckets = {
     create: [],
@@ -389,18 +437,38 @@ io.on("connection", (socket) => {
     return true;
   };
 
+  socket.on("practice:start", (_payload, ack) => {
+    const { id: memberId, nickname } = socket.data.member;
+    if (socketRooms.has(socket.id) || rooms.size >= MAX_ROOM_COUNT ||
+        !allowRate("create", CREATE_ROOM_RATE_LIMIT)) {
+      return emitAck(ack, { ok: false, error: "기록을 저장하는 연습 경기를 시작할 수 없습니다." });
+    }
+    const id = randomUUID();
+    const players = Array.from({ length: 4 }, (_, i) => ({
+      id: i, name: `${nickname} ${i + 1}`, status: "connected", socketId: socket.id,
+    }));
+    const room = {
+      hostId: 0, maxPlayers: 4, gameId: 0, difficulty: "normal", players, practiceMemberId: memberId,
+    };
+    rooms.set(id, room);
+    socketRooms.set(socket.id, id);
+    socket.data.practiceRoom = id;
+    socket.join(id);
+    startRound(id, room);
+    emitAck(ack, { ok: true, round: gameStartData(id, room, players[0]) });
+  });
+
   socket.on("room:create", (payload, ack) => {
     if (!allowRate("create", CREATE_ROOM_RATE_LIMIT))
       return emitError(socket, "요청이 너무 많습니다. 잠시 후 다시 시도하세요.", ack);
     if (socketRooms.has(socket.id)) return emitError(socket, "먼저 현재 방에서 나가세요.", ack);
     const maxPlayers = Number(payload?.maxPlayers);
     if (
-      !validName(payload?.name) ||
       !Number.isInteger(maxPlayers) ||
       maxPlayers < 2 ||
       maxPlayers > 4
     )
-      return emitError(socket, "닉네임은 1~10자, 인원수는 2~4명이어야 합니다.", ack);
+      return emitError(socket, "인원수는 2~4명이어야 합니다.", ack);
     if (rooms.size >= MAX_ROOM_COUNT)
       return emitError(socket, "생성 가능한 방 한도를 초과했습니다.", ack);
     let roomId;
@@ -414,7 +482,8 @@ io.on("connection", (socket) => {
     const player = {
       id: 0,
       socketId: socket.id,
-      name: payload.name.trim(),
+      name: socket.data.member.nickname,
+      memberId: socket.data.member.id,
       status: "connected",
       reconnectToken: randomBytes(32).toString("hex"),
     };
@@ -458,12 +527,16 @@ io.on("connection", (socket) => {
     if (!room) return emitError(socket, "방을 찾을 수 없습니다.", ack);
     if (room.status !== "waiting")
       return emitError(socket, "진행 중인 방에는 참여할 수 없습니다.", ack);
-    if (room.players.length >= room.maxPlayers || !validName(payload?.name))
-      return emitError(socket, "방이 가득 찼거나 닉네임이 올바르지 않습니다.", ack);
+    const { id: memberId, nickname } = socket.data.member;
+    if (room.players.some((player) => player.memberId === memberId))
+      return emitError(socket, "같은 계정으로 이미 방에 참여했습니다.", ack);
+    if (room.players.length >= room.maxPlayers)
+      return emitError(socket, "방이 가득 찼습니다.", ack);
     const player = {
       id: room.nextId++,
       socketId: socket.id,
-      name: payload.name.trim(),
+      name: nickname,
+      memberId,
       status: "connected",
       reconnectToken: randomBytes(32).toString("hex"),
     };
@@ -482,7 +555,8 @@ io.on("connection", (socket) => {
       return emitError(socket, "먼저 현재 방에서 나가세요.", ack);
     const room = rooms.get(id);
     const player = room?.players.find((candidate) => candidate.reconnectToken === token);
-    if (!room || !player || player.status === "eliminated")
+    if (!room || !player || player.status === "eliminated" ||
+        player.memberId !== socket.data.member.id)
       return emitError(socket, "재접속 세션이 만료되었습니다.", ack);
     if (player.socketId === socket.id && mappedRoom === id) {
       emitAck(ack, {
@@ -539,7 +613,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("room:rematch", (payload, ack) => {
-    const id = roomIdOf(payload?.roomId);
+    const id = gameRoomIdOf(payload?.roomId, socket);
     const room = rooms.get(id);
     const player = room?.players.find((candidate) => candidate.socketId === socket.id);
     const difficulty = payload?.difficulty;
@@ -561,9 +635,10 @@ io.on("connection", (socket) => {
   socket.on("game:move", (payload, ack) => {
     if (!allowRate("move", MOVE_RATE_LIMIT))
       return emitError(socket, "입력이 너무 빠릅니다. 잠시 후 다시 시도하세요.", ack);
-    const id = roomIdOf(payload?.roomId);
+    const id = gameRoomIdOf(payload?.roomId, socket);
     const room = rooms.get(id);
-    const player = room?.players.find((candidate) => candidate.socketId === socket.id);
+    const player = room?.players.find((candidate) => candidate.socketId === socket.id &&
+      (!room.practiceMemberId || candidate.id === room.turnPlayerId));
     const x = payload?.x;
     const y = payload?.y;
     const requestId = validRequestId(payload?.requestId) ? payload.requestId : "";

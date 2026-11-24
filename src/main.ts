@@ -2,6 +2,7 @@ import { io, Socket } from "socket.io-client";
 import StartGame from "./game/main";
 import type { Game as PhaserGame } from "phaser";
 import { TURN_SECONDS, type Difficulty } from "./constants";
+import { mountAccount, showLeaderboard, showProfile } from "./account-ui";
 
 export type GameSettings = {
   mode: "practice" | "multi";
@@ -49,9 +50,7 @@ type GameStartPayload = {
 };
 
 const SERVER_URL =
-  import.meta.env.VITE_SOCKET_URL ||
-  (location.protocol === "https:" ? `${location.origin}` : "http://localhost:3001");
-let nickname = "플레이어";
+  import.meta.env.VITE_SOCKET_URL || location.origin;
 let socket: Socket | undefined;
 let game: PhaserGame | undefined;
 let disposeRound: (() => void) | undefined;
@@ -71,7 +70,7 @@ document.addEventListener("DOMContentLoaded", () => {
   showLobby();
 });
 
-function showLobby() {
+function showLobby(notice = "") {
   clearNavigationTimer();
   screenGeneration += 1;
   screen = "main";
@@ -93,31 +92,109 @@ function showLobby() {
           <p class="subtitle">10초 안에 조준하고 상대 구슬을 밀어내세요.</p>
         </header>
         <section class="mode-grid" aria-label="게임 모드">
-          <button id="practice" class="mode-card">
+          <button id="practice" class="mode-card" disabled>
             <strong>연습 모드</strong>
             <span>구슬 4개로 조준과 힘 조절을 익혀보세요.</span>
             <span class="mode-action">연습 시작 <span aria-hidden="true">→</span></span>
           </button>
-          <button id="multi" class="mode-card mode-card-primary">
+          <button id="multi" class="mode-card mode-card-primary" disabled>
             <strong>멀티플레이</strong>
             <span>친구와 방 코드를 공유하고 2~4인 대전을 즐기세요.</span>
             <span class="mode-action">멀티플레이 입장 <span aria-hidden="true">→</span></span>
           </button>
         </section>
+        <footer class="home-actions">
+          <div id="account-actions">
+            <a id="kakao-login" class="account-login" href="/api/auth/kakao" aria-disabled="true">카카오 로그인</a>
+            <span id="account-nickname" hidden></span>
+            <button id="my-page" class="secondary-button" type="button">마이페이지</button>
+          </div>
+          <button id="leaderboard" class="secondary-button">순위표</button>
+        </footer>
+        <p id="home-status" class="status" role="status"></p>
       </div>
     </main>`;
-  root.querySelector("#practice")?.addEventListener("click", () => {
-    start({
-      mode: "practice",
-      playerCount: 4,
-      names: ["연습 1", "연습 2", "연습 3", "연습 4"],
-      serverUrl: SERVER_URL,
+  const practice = root.querySelector<HTMLButtonElement>("#practice")!;
+  const multi = root.querySelector<HTMLButtonElement>("#multi")!;
+  const status = root.querySelector<HTMLElement>("#home-status")!;
+  status.textContent = notice;
+  void mountAccount(root).then((session) => {
+    if (!practice.isConnected) return;
+    practice.disabled = multi.disabled = false;
+    const requireLogin = () => {
+      if (session?.member) return true;
+      if (session?.loginEnabled) {
+        location.assign("/api/auth/kakao");
+      } else {
+        status.textContent = "플레이하려면 카카오 로그인이 필요합니다. 서버의 로그인 설정을 확인해 주세요.";
+      }
+      return false;
+    };
+    practice.onclick = () => {
+      if (!requireLogin()) return;
+      practice.disabled = true;
+      void startRankedPractice(practice, status);
+    };
+    multi.onclick = () => {
+      if (requireLogin() && session?.member) showMultiplayer(root, session.member.nickname);
+    };
+  });
+  root.querySelector("#my-page")?.addEventListener("click", () => {
+    socket?.disconnect();
+    socket = undefined;
+    showProfile(root, () => showLobby(), () => {
+      clearSession();
+      showLobby("로그아웃했습니다.");
     });
   });
-  root.querySelector("#multi")?.addEventListener("click", () => showMultiplayer(root));
+  root.querySelector("#leaderboard")?.addEventListener("click", () => {
+    socket?.disconnect();
+    socket = undefined;
+    showLeaderboard(root, () => showLobby());
+  });
 }
 
-function showMultiplayer(root: HTMLElement) {
+async function startRankedPractice(button: HTMLButtonElement, status: HTMLElement) {
+  const current = io(SERVER_URL, { reconnection: false, withCredentials: true, timeout: 4000 });
+  socket = current;
+  current.on("connect_error", (error) => {
+    if (button.isConnected && error.message === "AUTH_REQUIRED") location.assign("/api/auth/kakao");
+  });
+  status.textContent = "순위에 반영되는 연습 경기를 준비 중입니다…";
+  try {
+    const result = await current.timeout(5000).emitWithAck("practice:start", {});
+    if (!button.isConnected) {
+      current.disconnect();
+      return;
+    }
+    if (!result?.ok) throw new Error(result?.error || "연습 경기를 시작할 수 없습니다.");
+    const round: GameStartPayload = result.round;
+    screen = "playing";
+    current.on("disconnect", () => {
+      if (socket === current && screen === "playing") {
+        showLobby("연습 경기 연결이 끊겼습니다.");
+      }
+    });
+    start({
+      mode: "practice", playerCount: round.players.length,
+      names: round.players.map((player) => player.name),
+      playerIds: round.players.map((player) => player.id),
+      roomId: round.roomId, gameId: round.gameId, playerId: round.playerId,
+      turnId: round.turnId, hostId: round.hostId, difficulty: round.difficulty,
+      rematchReady: round.rematchReady, initialState: round.state,
+      serverUrl: SERVER_URL, socket: current,
+    });
+  } catch (error) {
+    current.disconnect();
+    if (button.isConnected) {
+      button.disabled = false;
+      status.textContent = error instanceof Error ? error.message : "연습 경기를 시작할 수 없습니다.";
+    }
+  }
+}
+
+function showMultiplayer(root: HTMLElement, nickname: string) {
+  socket?.disconnect();
   clearNavigationTimer();
   screen = "waiting";
   root.innerHTML = `
@@ -127,7 +204,7 @@ function showMultiplayer(root: HTMLElement) {
         <h1>멀티플레이</h1>
         <section id="room-setup" class="panel">
           <label for="nickname">닉네임</label>
-          <input id="nickname" maxlength="10" value="${escapeHtml(nickname)}">
+          <input id="nickname" value="${escapeHtml(nickname)}" readonly>
           <div class="room-options">
             <div class="room-option">
               <label for="count">참가 인원</label>
@@ -148,6 +225,7 @@ function showMultiplayer(root: HTMLElement) {
   const generation = screenGeneration;
   socket = io(SERVER_URL, {
     autoConnect: false,
+    withCredentials: true,
     reconnection: true,
     reconnectionAttempts: Infinity,
     reconnectionDelay: 1000,
@@ -249,7 +327,11 @@ function showMultiplayer(root: HTMLElement) {
       status.textContent = "서버에 재접속 중...";
   };
   currentSocket.io.on("reconnect_attempt", onReconnectAttempt);
-  currentSocket.on("connect_error", () => {
+  currentSocket.on("connect_error", (error) => {
+    if (error.message === "AUTH_REQUIRED") {
+      if (status.isConnected) location.assign("/api/auth/kakao");
+      return;
+    }
     status.textContent = "멀티플레이 서버에 연결할 수 없습니다. 다시 시도하는 중입니다…";
   });
   const onCreated = (room: {
@@ -317,12 +399,11 @@ function showMultiplayer(root: HTMLElement) {
   currentSocket.connect();
   root.querySelector("#create")?.addEventListener("click", () => {
     if (!currentSocket.connected || requestPending) return;
-    nickname = inputValue(root, "#nickname", nickname);
     requestPending = true;
     setLobbyButtons(root, true);
     currentSocket.emit(
       "room:create",
-      { name: nickname, maxPlayers: Number(inputValue(root, "#count", "2")) },
+      { maxPlayers: Number(inputValue(root, "#count", "2")) },
       (result: { ok: boolean; error?: string; playerId?: number; reconnectToken?: string }) => {
         if (!result?.ok) onError(result?.error || "방 생성에 실패했습니다.");
       },
@@ -331,13 +412,12 @@ function showMultiplayer(root: HTMLElement) {
   root.querySelector("#join-form")?.addEventListener("submit", (event) => {
     event.preventDefault();
     if (!currentSocket.connected || requestPending) return;
-    nickname = inputValue(root, "#nickname", nickname);
     roomCode = inputValue(root, "#room", "").toUpperCase();
     requestPending = true;
     setLobbyButtons(root, true);
     currentSocket.emit(
       "room:join",
-      { roomId: roomCode, name: nickname },
+      { roomId: roomCode },
       (result: { ok: boolean; playerId?: number; reconnectToken?: string; error?: string }) => {
         if (generation !== screenGeneration || leavingToMain) return;
         if (result?.ok && result.playerId !== undefined && result.reconnectToken) {

@@ -113,6 +113,46 @@ input, select { width: 100%; min-width: 0; background: #101e18; color: inherit; 
 }
 .player-list li span { color: var(--gold); flex: none; }
 
+.home-actions, #account-actions, .ranking-tabs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.home-actions { margin-top: 18px; justify-content: space-between; }
+#account-actions { color: var(--muted); }
+.account-login {
+  display: inline-flex;
+  align-items: center;
+  min-height: 46px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  color: #171500;
+  background: #fee500;
+  font-weight: 700;
+  text-decoration: none;
+}
+.account-login[aria-disabled="true"] { opacity: .6; }
+.profile-details { display: grid; gap: 12px; }
+#nickname-help { color: var(--muted); }
+#profile-status:empty { display: none; }
+.ranking-tabs button { flex: 1; }
+.ranking-tabs button[aria-pressed="false"] {
+  background: transparent;
+  color: inherit;
+  border-color: var(--line);
+}
+.ranking-table { width: 100%; border-collapse: collapse; }
+.ranking-table th, .ranking-table td {
+  padding: 10px 6px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.ranking-table td:last-child, .ranking-table th:last-child { text-align: right; }
+.ranking-table td:first-child, .ranking-table th:first-child { width: 3.5rem; }
+#ranking-status:empty, #home-status:empty { display: none; }
+
 .result-actions {
   position: absolute;
   z-index: 1;

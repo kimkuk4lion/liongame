@@ -32,6 +32,7 @@ Liongame은 Phaser 기반의 웹 구슬 게임입니다. 혼자 연습하거나,
 | 게임 클라이언트 | Phaser 3, TypeScript |
 | 빌드·개발 서버 | Vite 6 |
 | 실시간 통신 | Socket.IO 4 (클라이언트·서버) |
+| 데이터베이스 | PostgreSQL |
 | 서버 런타임 | Node.js (운영 CI: 24) |
 | 프론트엔드 배포 | Vite 정적 빌드 (`docs/`) |
 | CI/CD | GitHub Actions, SSH, rsync |
@@ -60,35 +61,48 @@ git switch development
 
 ### 환경변수
 
-저장소의 `.env.example`을 참고하여 로컬용 `.env.development`를 생성합니다.
+저장소의 `.env.example`을 복사해 로컬용 `.env`를 만듭니다. 이미 `.env`가 있으면 필요한 항목만 입력합니다.
 
 **Windows PowerShell**
 
 ```powershell
-Copy-Item .env.example .env.development
+Copy-Item .env.example .env
 ```
 
 **macOS / Linux**
 
 ```bash
-cp .env.example .env.development
+cp .env.example .env
 ```
 
 예시:
 
 ```dotenv
-VITE_SOCKET_URL=http://localhost:3001
 PORT=3001
 CORS_ORIGIN=http://localhost:8080
+APP_URL=http://localhost:8080/
+KAKAO_REST_API_KEY=
+KAKAO_CLIENT_SECRET=
+KAKAO_REDIRECT_URI=http://localhost:8080/api/auth/kakao/callback
+DATABASE_URL=
 ```
 
 | 변수 | 사용처 | 설명 |
 | --- | --- | --- |
-| `VITE_SOCKET_URL` | 브라우저 클라이언트 | Socket.IO 연결 주소. `VITE_` 변수는 브라우저 번들에 포함됩니다. |
+| `VITE_SOCKET_URL` | 브라우저 클라이언트 | Socket.IO 주소를 별도로 지정할 때 사용합니다. 기본은 게임 페이지와 같은 origin입니다. |
 | `PORT` | Node.js 서버 | Socket.IO 서버가 수신할 포트 |
 | `CORS_ORIGIN` | Node.js 서버 | 허용할 프론트엔드 Origin |
+| `APP_URL` | Node.js 서버 | 카카오 로그인에 필요한 공개 게임 주소. 로그인 완료 후 이동과 계정 변경 요청의 출처 검증에 사용합니다. |
+| `KAKAO_REST_API_KEY` | Node.js 서버 | 카카오 앱 REST API 키 |
+| `KAKAO_CLIENT_SECRET` | Node.js 서버 | 카카오 앱에서 발급한 클라이언트 시크릿 |
+| `KAKAO_REDIRECT_URI` | Node.js 서버 | 카카오 앱에 등록한 전체 콜백 주소 |
+| `DATABASE_URL` | Node.js 서버 | PostgreSQL 연결 주소. 형식은 `postgresql://사용자:비밀번호@호스트:5432/데이터베이스`입니다. |
 
-`.env.development` 및 `.env.production`은 Git 추적에서 제외됩니다. 비밀키는 `VITE_` 변수에 넣지 마세요.
+`.env`, `.env.development`, `.env.production`은 Git 추적에서 제외됩니다. 비밀키는 `VITE_` 변수에 넣지 마세요.
+
+카카오 개발자 콘솔에서 카카오 로그인을 활성화하고 `KAKAO_REDIRECT_URI`와 일치하는 주소를 등록합니다. 로컬에서는 게임과 콜백 모두 `localhost` 주소를 사용하세요. 카카오 로그인에서 이메일 동의 화면을 없애려면 카카오 개발자 콘솔에서도 **카카오계정(이메일)** 동의항목을 사용 안 함으로 설정합니다. 최초 가입 시 한글 단어 4글자와 숫자 4자리로 닉네임을 생성합니다. 마이페이지에서 닉네임을 변경할 수 있으며 순위표에는 게임 닉네임이 표시됩니다. [카카오 로그인 설정](https://developers.kakao.com/docs/ko/kakaologin/prerequisite)
+
+PostgreSQL에 애플리케이션용 데이터베이스와 사용자를 만든 뒤 `DATABASE_URL`을 입력합니다. 서버는 시작할 때 필요한 테이블을 생성합니다. 연습과 멀티플레이에는 카카오 로그인이 필요하며 계정 닉네임을 사용합니다. 순위표에는 연습 최고 점수와 멀티플레이 승리 횟수 기준으로 각각 상위 10명이 표시됩니다.
 
 ### 로컬 실행
 
@@ -113,10 +127,10 @@ npm run dev
 | --- | --- |
 | `npm ci` | 잠금 파일 기준 의존성 설치 |
 | `npm run dev` | Vite 개발 서버 실행 |
-| `npm run server` | `.env.development`로 Socket.IO 서버 실행 |
+| `npm run server` | `.env`와 선택적인 `.env.development`를 읽어 서버 실행 |
 | `npm run typecheck` | TypeScript 타입 검사 |
 | `npm run build` | 프로덕션 정적 빌드 (`docs/` 출력) |
-| `npm run server:prod` | `.env.production`으로 Socket.IO 서버 실행 |
+| `npm run server:prod` | `.env`와 선택적인 `.env.production`을 읽어 서버 실행 |
 
 `server` / `server:prod` 명령은 Node.js의 `--env-file` 옵션을 사용하므로 해당 옵션을 지원하는 Node.js 버전이 필요합니다.
 
@@ -126,11 +140,11 @@ npm run dev
 브라우저
   └─ https://game.cloudxt.app
        ├─ 정적 게임 리소스 (Vite 빌드: docs/)
-       └─ /socket.io/ → 실시간 통신 서버
+       └─ /socket.io/, /api/ → 게임 서버
                            └─ Node.js + Socket.IO (PM2 관리)
 ```
 
-게임 페이지와 Socket.IO 요청은 같은 공개 도메인 `game.cloudxt.app`을 사용합니다. 실제 리버스 프록시 및 내부 포트 연결은 운영 서버의 Nginx 설정에 따라 달라질 수 있습니다.
+운영 Nginx에서 같은 도메인의 `/api/`를 기존 Socket.IO 백엔드 포트로 프록시하고 경로를 유지합니다. 운영 환경의 `APP_URL`, `CORS_ORIGIN`, `KAKAO_REDIRECT_URI`에는 공개 HTTPS 주소를 사용합니다.
 
 ### CI/CD
 
@@ -161,6 +175,11 @@ GitHub Actions에 필요한 Secrets:
 VITE_SOCKET_URL=https://game.cloudxt.app
 PORT=3001
 CORS_ORIGIN=https://game.cloudxt.app
+APP_URL=https://game.cloudxt.app/
+KAKAO_REST_API_KEY=
+KAKAO_CLIENT_SECRET=
+KAKAO_REDIRECT_URI=https://game.cloudxt.app/api/auth/kakao/callback
+DATABASE_URL=
 ```
 
 여기서 포트 3001은 프로젝트의 기본값이며, 실제 운영 포트는 서버 설정을 확인해야 합니다. 정적 클라이언트의 `VITE_SOCKET_URL`은 GitHub Actions 빌드 환경에서 설정합니다.
