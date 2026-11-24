@@ -1,22 +1,21 @@
 import type { Socket } from "socket.io-client";
 import { Scene } from "phaser";
-import { AIM_SENSITIVITY, MOVE_DURATION, MOVE_RANDOM } from "../../constants";
+import { AIM_SENSITIVITY, GAME_HEIGHT, GAME_WIDTH, TURN_SECONDS } from "../../constants";
 import type { GameSettings } from "../../main";
 import { Marble, RenderArgs, System } from "../../system";
+
+const MIN_PULL_DISTANCE = 6;
 
 export class Game extends Scene {
   static initialSettings?: GameSettings;
   private settings!: GameSettings;
   private socket?: Socket;
   private system?: System;
-  private dragging = false;
-  private aimTurn = -1;
-  private aimTurnId = 0;
+  private aim?: { pointerId: number; turn: number; x: number; y: number };
   private requestSequence = 0;
   private latestVersion = 0;
   private aborted = false;
   private abortTimer: number | undefined;
-  private finishClickArmed = false;
   private readonly cleanup: (() => void)[] = [];
 
   constructor() {
@@ -47,36 +46,42 @@ export class Game extends Scene {
     const labels: Phaser.GameObjects.Text[] = [];
     const description = this.add
       .text(18, 18, "", {
-        color: "#241b12",
+        color: "#f7f1df",
         fontSize: 22,
         fontStyle: "bold",
-        backgroundColor: "#ffffffcc",
+        backgroundColor: "#192c25",
         padding: { x: 10, y: 8 },
       })
       .setDepth(10);
     const powerText = this.add
-      .text(18, 86, "힘: 0%", {
-        color: "#241b12",
+      .text(18, 86, "", {
+        color: "#f1cc83",
         fontSize: 18,
-        backgroundColor: "#ffffffcc",
+        backgroundColor: "#192c25",
         padding: { x: 8, y: 5 },
       })
-      .setDepth(10);
+      .setDepth(10)
+      .setVisible(false);
     const backButton = this.add.container(516, 38).setDepth(20);
     const backBackground = this.add
-      .rectangle(0, 0, 140, 46, 0xf5c778, 1)
-      .setStrokeStyle(2, 0xd8934d)
+      .rectangle(0, 0, 140, 46, 0xf1cc83, 1)
+      .setStrokeStyle(2, 0x78663f)
       .setInteractive({ useHandCursor: true });
     const backLabel = this.add
       .text(0, 0, "메인으로", {
-        color: "#2b160d",
+        color: "#1c251d",
         fontSize: 18,
         fontStyle: "bold",
       })
       .setOrigin(0.5);
     backButton.add([backBackground, backLabel]);
-    backBackground.on("pointerdown", () => {
-      if (window.confirm("게임을 나가면 현재 플레이어는 탈락 처리됩니다. 메인으로 이동할까요?"))
+    backBackground.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (!pointer.wasTouch && pointer.button !== 0) return;
+      if (
+        this.settings.mode === "practice" ||
+        this.system?.getSnapshot().state === "finished" ||
+        window.confirm("게임을 나가면 현재 플레이어는 탈락 처리됩니다. 메인으로 이동할까요?")
+      )
         this.settings.onExit?.();
     });
     const guideLine = this.add
@@ -94,18 +99,24 @@ export class Game extends Scene {
       .setLineWidth(4, 1)
       .setVisible(false);
     const trajectory = this.add.graphics().setDepth(4).setVisible(false);
-    const cursor = this.add.circle(-9999, 0, MOVE_RANDOM, 0x0000ff, 0.2).setDepth(-1);
     const playerIds =
       this.settings.playerIds ??
       Array.from({ length: this.settings.playerCount }, (_, index) => index);
+    let pendingShot: string | undefined;
     const system = new System(
       playerIds,
-      (args) => this.render(args, marbleImages, labels, description, guideLine, powerText),
+      (args) => {
+        if (this.aim && (args.turn !== this.aim.turn || args.state !== "wait_move" || args.remainingSeconds === 0))
+          this.cancelAim(aimLine, pullLine, trajectory, powerText);
+        this.render(args, marbleImages, labels, description, guideLine);
+      },
       this.settings.names,
-      this.settings.mode === "multi",
+      Boolean(this.settings.socket),
+      (x, y) => this.showLionHit(x, y),
+      TURN_SECONDS[this.settings.difficulty ?? "normal"],
     );
     this.system = system;
-    if (this.settings.mode === "multi" && this.settings.initialState) {
+    if (this.settings.socket && this.settings.initialState) {
       const initialState = this.settings.initialState as Parameters<System["applyServerState"]>[0];
       this.latestVersion = Math.max(this.latestVersion, initialState.version ?? 0);
       system.applyServerState(initialState);
@@ -125,31 +136,28 @@ export class Game extends Scene {
       if (state.gameId !== this.settings.gameId || state.version <= this.latestVersion) return;
       this.latestVersion = state.version;
       this.settings.turnId = state.turnId;
+      pendingShot = undefined;
       this.cancelAim(aimLine, pullLine, trajectory, powerText);
       system.applyServerState(state);
     };
-    if (this.settings.mode === "multi") {
-      if (!this.settings.socket) return;
+    if (this.settings.socket) {
       this.socket = this.settings.socket;
+      const onLionHit = (hit: { gameId: number; x: number; y: number }) => {
+        if (hit.gameId === this.settings.gameId) this.showLionHit(hit.x, hit.y);
+      };
+      this.socket.on("game:lion-hit", onLionHit);
+      this.cleanup.push(() => this.socket?.off("game:lion-hit", onLionHit));
       this.socket.on("game:state", onState);
       this.cleanup.push(() => this.socket?.off("game:state", onState));
       const onError = (message: string) => {
+        if (system.getSnapshot().state === "finished") return;
         description.setText(message);
-        system.applyServerState({
-          version: this.latestVersion + 1,
-          gameId: this.settings.gameId ?? 0,
-          turnId: this.settings.turnId ?? 0,
-          turnPlayerId: system.getSnapshot().turn,
-          deadline: Date.now(),
-          state: "wait_move",
-          marbles: system.getSnapshot().marbles,
-        });
       };
       this.socket.on("game:error", onError);
       this.cleanup.push(() => this.socket?.off("game:error", onError));
       const onTurn = (turn: { playerId: number; turnId: number; deadline: number }) => {
         this.settings.turnId = turn.turnId;
-        this.dragging = false;
+        this.cancelAim(aimLine, pullLine, trajectory, powerText);
         system.syncTurn(turn.playerId, Math.max(0, turn.deadline - Date.now()));
       };
       this.socket.on("game:turn", onTurn);
@@ -197,7 +205,7 @@ export class Game extends Scene {
         if (this.aborted) return;
         this.aborted = true;
         description.setText(data.message);
-        this.cleanupAim(aimLine, pullLine, trajectory, powerText);
+        this.cancelAim(aimLine, pullLine, trajectory, powerText);
         this.abortTimer = window.setTimeout(() => this.settings.onAbort?.(), 800);
       };
       this.socket.on("game:aborted", onAborted);
@@ -206,104 +214,84 @@ export class Game extends Scene {
 
     system.render();
     const updateAim = (pointer: Phaser.Input.Pointer) => {
-      if (!this.dragging) return;
+      if (this.aim?.pointerId !== pointer.id) return;
       const snapshot = system.getSnapshot();
       const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
       if (!current) return;
-      const pullX = current.x - pointer.x;
-      const pullY = current.y - pointer.y;
-      const pullDistance = Math.min(200, Math.hypot(pullX, pullY) * AIM_SENSITIVITY);
-      const scale = pullDistance / (Math.hypot(pullX, pullY) || 1);
-      const launchX = current.x + pullX * scale;
-      const launchY = current.y + pullY * scale;
-      const power = Math.round(pullDistance / 2);
-      powerText.setText(`힘: ${power}%`);
-      aimLine.setTo(current.x, current.y, launchX, launchY).setVisible(true);
+      const { x, y, pulled, travel } = aimTarget(current, pointer);
+      powerText
+        .setText(`당긴 거리 ${Math.round(pulled)} px  ·  예상 이동 ${Math.round(travel)} px  ·  힘 ${Math.round(travel / 2)}%`)
+        .setVisible(true);
+      aimLine.setTo(current.x, current.y, x, y).setVisible(travel >= 8);
       pullLine.setTo(current.x, current.y, pointer.x, pointer.y).setVisible(true);
-      drawTrajectory(trajectory, current.x, current.y, launchX - current.x, launchY - current.y);
+      drawTrajectory(current.x, current.y, x, y, travel);
     };
     const drawTrajectory = (
-      graphics: Phaser.GameObjects.Graphics,
       startX: number,
       startY: number,
-      directionX: number,
-      directionY: number,
+      endX: number,
+      endY: number,
+      length: number,
     ) => {
-      const length = Math.hypot(directionX, directionY) || 1;
-      const unitX = directionX / length;
-      const unitY = directionY / length;
-      const guideLength = 420;
-      graphics.clear();
-      graphics.fillStyle(0x1d70ff, 0.9);
-      for (let distance = 24; distance <= guideLength; distance += 24) {
-        const x = Phaser.Math.Clamp(startX + unitX * distance, 12, 588);
-        const y = Phaser.Math.Clamp(startY + unitY * distance, 12, 1288);
-        graphics.fillCircle(x, y, Math.max(2, 5 - distance / 140));
-        if (x === 12 || x === 588 || y === 12 || y === 1288) break;
+      trajectory.clear().setVisible(length >= 8);
+      if (length < 8) return;
+      const unitX = (endX - startX) / length;
+      const unitY = (endY - startY) / length;
+      trajectory.lineStyle(2, 0x1359ae, 1);
+      for (let distance = 25; distance < length - 10; distance += 25) {
+        const x = startX + unitX * distance;
+        const y = startY + unitY * distance;
+        trajectory.lineBetween(x - unitY * 5, y + unitX * 5, x + unitY * 5, y - unitX * 5);
       }
-      graphics.lineStyle(2, 0xffd166, 0.85);
-      graphics.strokeCircle(
-        Phaser.Math.Clamp(startX + unitX * Math.min(length, guideLength), 12, 588),
-        Phaser.Math.Clamp(startY + unitY * Math.min(length, guideLength), 12, 1288),
-        10,
-      );
-      graphics.setVisible(true);
+      trajectory.strokeCircle(endX, endY, 9);
     };
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (this.aborted || this.aim || pendingShot || (!pointer.wasTouch && pointer.button !== 0)) return;
       const snapshot = system.getSnapshot();
       const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
-      if (!current || !current.alive || snapshot.state !== "wait_move") return;
+      if (!current || !current.alive || snapshot.state !== "wait_move" || snapshot.remainingSeconds === 0) return;
       if (this.settings.mode === "multi" && current.id !== this.settings.playerId) return;
       if (Math.hypot(pointer.x - current.x, pointer.y - current.y) > 40) return;
-      this.dragging = true;
-      this.aimTurn = current.id;
-      this.aimTurnId = this.settings.turnId ?? this.aimTurnId + 1;
+      this.aim = { pointerId: pointer.id, turn: current.id, x: pointer.x, y: pointer.y };
       updateAim(pointer);
     });
     this.input.on("pointermove", updateAim);
     const shoot = (pointer: Phaser.Input.Pointer) => {
-      if (!this.dragging) return;
-      this.dragging = false;
-      this.cleanupAim(aimLine, pullLine, trajectory, powerText);
+      const aim = this.aim;
+      if (!aim || aim.pointerId !== pointer.id || (!pointer.wasTouch && pointer.button !== 0)) return;
+      this.cancelAim(aimLine, pullLine, trajectory, powerText);
+      if (pointer.wasCanceled || Math.hypot(pointer.x - aim.x, pointer.y - aim.y) < MIN_PULL_DISTANCE) return;
       const snapshot = system.getSnapshot();
       const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
       if (
-        this.aimTurn !== snapshot.turn ||
+        !current || snapshot.state !== "wait_move" || snapshot.remainingSeconds === 0 ||
+        aim.turn !== snapshot.turn ||
         (this.settings.mode === "multi" && current?.id !== this.settings.playerId)
       )
         return;
-      if (!current) return;
-      const pullX = current.x - pointer.x;
-      const pullY = current.y - pointer.y;
-      const pullDistance = Math.min(200, Math.hypot(pullX, pullY) * AIM_SENSITIVITY);
-      if (pullDistance < 8) {
-        powerText.setText("힘: 0%");
-        return;
-      }
-      const scale = pullDistance / (Math.hypot(pullX, pullY) || 1);
-      const launchX = current.x + pullX * scale;
-      const launchY = current.y + pullY * scale;
-      if (this.settings.mode === "multi") {
+      const { x, y, travel } = aimTarget(current, pointer);
+      if (travel < 8) return;
+      if (this.socket) {
+        if (!this.socket.connected) return;
         const requestId = `${this.settings.gameId}-${this.settings.turnId}-${++this.requestSequence}`;
-        this.socket?.emit(
+        pendingShot = requestId;
+        this.socket.timeout(4000).emit(
           "game:move",
           {
             roomId: this.settings.roomId,
             gameId: this.settings.gameId,
             turnId: this.settings.turnId,
             requestId,
-            x: launchX,
-            y: launchY,
+            x,
+            y,
           },
-          (result: { ok: boolean }) => {
-            if (!result?.ok) this.cancelAim(aimLine, pullLine, trajectory, powerText);
+          (error: Error | null, result?: { ok: boolean }) => {
+            if (pendingShot !== requestId) return;
+            if (error || !result?.ok) pendingShot = undefined;
           },
         );
       } else {
-        const move = system.moveMarble(launchX, launchY);
-        if (!move) return;
-        cursor.setPosition(launchX, launchY);
-        this.time.delayedCall(MOVE_DURATION, () => cursor.setPosition(-9999, 0));
+        system.moveMarble(x, y);
       }
     };
     this.input.on("pointerup", shoot);
@@ -319,26 +307,15 @@ export class Game extends Scene {
     this.cleanup.push(() => window.removeEventListener("blur", onBlur));
     this.events.once("shutdown", () => this.cleanupScene());
     this.events.once("destroy", () => this.cleanupScene());
+    this.cleanup.push(() => { pendingShot = undefined; });
+    if (system.getSnapshot().state !== "finished") this.settings.onReady?.();
   }
 
   private cleanupScene() {
-    this.dragging = false;
+    this.aim = undefined;
     if (this.abortTimer !== undefined) window.clearTimeout(this.abortTimer);
     this.cleanup.splice(0).forEach((dispose) => dispose());
     this.system?.destroy();
-  }
-
-  private cleanupAim(
-    aimLine: Phaser.GameObjects.Line,
-    pullLine: Phaser.GameObjects.Line,
-    trajectory: Phaser.GameObjects.Graphics,
-    powerText: Phaser.GameObjects.Text,
-  ) {
-    this.dragging = false;
-    aimLine.setVisible(false);
-    pullLine.setVisible(false);
-    trajectory.clear().setVisible(false);
-    powerText.setText("힘: 0%");
   }
 
   private cancelAim(
@@ -347,9 +324,11 @@ export class Game extends Scene {
     trajectory: Phaser.GameObjects.Graphics,
     powerText: Phaser.GameObjects.Text,
   ) {
-    this.aimTurn = -1;
-    this.aimTurnId = 0;
-    this.cleanupAim(aimLine, pullLine, trajectory, powerText);
+    this.aim = undefined;
+    aimLine.setVisible(false);
+    pullLine.setVisible(false);
+    trajectory.clear().setVisible(false);
+    powerText.setVisible(false);
   }
 
   private render(
@@ -358,7 +337,6 @@ export class Game extends Scene {
     labels: Phaser.GameObjects.Text[],
     description: Phaser.GameObjects.Text,
     guideLine: Phaser.GameObjects.Line,
-    powerText: Phaser.GameObjects.Text,
   ) {
     if (marbleImages.length === 0) {
       args.marbles.forEach(() => {
@@ -381,21 +359,9 @@ export class Game extends Scene {
     }
 
     const current = args.marbles.find((marble) => marble.id === args.turn);
-    const currentPower = current
-      ? Math.min(
-          100,
-          Math.round(
-            Math.hypot(
-              this.input.activePointer.x - current.x,
-              this.input.activePointer.y - current.y,
-            ) / 2,
-          ),
-        )
-      : 0;
-    powerText.setText(`힘: ${currentPower}%`);
     description.setText(
       args.winner
-        ? `${args.winner.name}님이 우승하였습니다!\n클릭하면 스코어보드를 확인합니다.`
+        ? `${args.winner.name}님이 우승했습니다!`
         : args.state === "paused"
           ? "연결이 끊긴 플레이어를 기다리는 중입니다."
           : current
@@ -419,17 +385,38 @@ export class Game extends Scene {
       }
     });
 
-    if (args.winner && !this.children.getByName("scoreboard")) {
-      if (!this.finishClickArmed) {
-        this.finishClickArmed = true;
-        this.input.once("pointerdown", () => {
-          this.finishClickArmed = false;
-          if (!this.children.getByName("scoreboard")) this.showScoreboard(args.marbles);
-        });
-      }
-    } else if (!args.winner) {
-      this.finishClickArmed = false;
+    if (args.state === "finished" && !this.children.getByName("scoreboard")) {
+      this.showScoreboard(args.marbles);
+      this.settings.onFinished?.();
     }
+  }
+
+  private showLionHit(x: number, y: number) {
+    const ring = this.add.circle(x, y, 16, 0xf1cc83, 0.25)
+      .setStrokeStyle(3, 0xffd166)
+      .setDepth(11);
+    const points = this.add.text(
+      Phaser.Math.Clamp(x, 36, this.scale.width - 36),
+      Math.max(60, y - 22),
+      "+2",
+      { color: "#ffe2a9", fontSize: "26px", fontStyle: "bold", stroke: "#192c25", strokeThickness: 5 },
+    ).setOrigin(0.5).setDepth(12);
+    this.tweens.add({
+      targets: ring,
+      scale: 3.5,
+      alpha: 0,
+      duration: 460,
+      ease: "Quad.Out",
+      onComplete: () => ring.destroy(),
+    });
+    this.tweens.add({
+      targets: points,
+      y: points.y - 30,
+      alpha: 0,
+      duration: 700,
+      ease: "Quad.Out",
+      onComplete: () => points.destroy(),
+    });
   }
 
   private showScoreboard(marbles: Marble[]) {
@@ -438,15 +425,25 @@ export class Game extends Scene {
       .map((marble, index) => `${index + 1}. ${marble.name}  ${marble.score}점`)
       .join("\n");
     this.add
-      .text(300, 650, `스코어보드\n\n${board}`, {
-        color: "#25170d",
+      .text(300, 650, `최종 순위\n\n${board}`, {
+        color: "#f7f1df",
         fontSize: 28,
         align: "center",
-        backgroundColor: "#fffbeeee",
+        backgroundColor: "#192c25",
         padding: { x: 24, y: 20 },
       })
       .setName("scoreboard")
       .setOrigin(0.5)
       .setDepth(20);
   }
+}
+
+function aimTarget(marble: Marble, pointer: Phaser.Input.Pointer) {
+  const dx = marble.x - pointer.x;
+  const dy = marble.y - pointer.y;
+  const pulled = Math.hypot(dx, dy);
+  const scale = Math.min(200, pulled * AIM_SENSITIVITY) / (pulled || 1);
+  const x = Phaser.Math.Clamp(marble.x + dx * scale, 10, GAME_WIDTH - 10);
+  const y = Phaser.Math.Clamp(marble.y + dy * scale, 10, GAME_HEIGHT - 10);
+  return { x, y, pulled, travel: Math.hypot(x - marble.x, y - marble.y) };
 }

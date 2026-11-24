@@ -1,18 +1,29 @@
 import { createServer } from "node:http";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { Server } from "socket.io";
+import { createAccounts } from "./accounts.mjs";
 
 const port = Number(process.env.PORT) || 3001;
-const origins = (process.env.CORS_ORIGIN || "*").split(",").map((value) => value.trim());
-const httpServer = createServer();
+const origins = (process.env.CORS_ORIGIN ||
+  (process.env.APP_URL ? new URL(process.env.APP_URL).origin : "*"))
+  .split(",").map((value) => value.trim());
+const accounts = await createAccounts();
+const httpServer = createServer((req, res) => {
+  accounts.handle(req, res).catch(() => {
+    console.error("Game API request failed");
+    if (!res.headersSent) res.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error: "요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요." }));
+  });
+});
 const io = new Server(httpServer, {
-  cors: { origin: origins.length === 1 ? origins[0] : origins },
+  cors: { origin: origins.includes("*") ? "*" : origins, credentials: !origins.includes("*") },
   pingInterval: 25_000,
   pingTimeout: 30_000,
 });
 const rooms = new Map();
+const publicLobby = "multiplayer-lobby";
 const socketRooms = new Map();
-const TURN_LIMIT_MS = 10_000;
+const TURN_LIMITS = { easy: 15_000, normal: 10_000, hard: 6_000 };
 const RECONNECT_GRACE_MS = 30_000;
 const WIDTH = 600;
 const HEIGHT = 1300;
@@ -37,14 +48,14 @@ const HOLES = [
   { x: 300, y: 150 },
 ];
 
-const validName = (value) =>
-  typeof value === "string" && value.trim().length > 0 && value.trim().length <= 10;
 const sessionTokenOf = (value) =>
   typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : "";
 const roomIdOf = (value) => {
   const roomId = typeof value === "string" ? value.trim() : "";
   return /^\d{4}$/.test(roomId) ? roomId : "";
 };
+const gameRoomIdOf = (value, socket) => socket.data.practiceRoom === value
+  ? socket.data.practiceRoom : roomIdOf(value);
 const finiteCoordinate = (value, min, max) =>
   Number.isFinite(value) && value >= min && value <= max;
 const validRequestId = (value) =>
@@ -77,21 +88,68 @@ function firstContactOnSegment(startX, startY, endX, endY, pointX, pointY, radiu
   return { t: clampedT, x: contactX, y: contactY };
 }
 
-function roomSummary(roomId, room) {
+function lobbyEntry(roomId, room) {
   return {
     roomId,
+    title: room.title,
     count: room.players.length,
     maxPlayers: room.maxPlayers,
+    creatorName: room.creatorName,
+  };
+}
+
+function roomSummary(roomId, room) {
+  return {
+    ...lobbyEntry(roomId, room),
     hostId: room.hostId,
     status: room.status,
+    rematchReady: canRematch(room),
     players: room.players.map(({ id, name }) => ({ id, name, isHost: id === room.hostId })),
   };
+}
+
+function canRematch(room) {
+  if (room.status !== "finished") return false;
+  const remaining = room.players.filter((player) => player.status !== "eliminated");
+  return remaining.length >= 2 && remaining.every((player) => player.status === "connected");
+}
+
+function gameStartData(roomId, room, player) {
+  return {
+    roomId,
+    gameId: room.gameId,
+    playerId: player.id,
+    turnId: room.turnId,
+    deadline: room.deadline,
+    hostId: room.hostId,
+    difficulty: room.difficulty,
+    rematchReady: canRematch(room),
+    players: room.state.marbles.map(({ id, name }) => ({ id, name })),
+    state: snapshot(room),
+  };
+}
+
+function startRound(roomId, room) {
+  if (room.status === "waiting") io.to(publicLobby).emit("lobby:room", { roomId });
+  resetGameState(room);
+  room.status = "playing";
+  for (const player of room.practiceMemberId ? room.players.slice(0, 1) : room.players) {
+    io.to(player.socketId).emit("game:start", gameStartData(roomId, room, player));
+  }
 }
 
 function publish(roomId) {
   const room = rooms.get(roomId);
   if (!room) return;
   io.to(roomId).emit("room:update", roomSummary(roomId, room));
+  if (room.status === "waiting") {
+    io.to(publicLobby).emit("lobby:room", { roomId, room: lobbyEntry(roomId, room) });
+  }
+}
+
+function removeRoom(roomId, room) {
+  rooms.delete(roomId);
+  if (room.status === "waiting") io.to(publicLobby).emit("lobby:room", { roomId });
 }
 
 function emitError(socket, message, ack) {
@@ -139,11 +197,12 @@ function broadcastState(roomId, room, requestId) {
 }
 
 function resetGameState(room) {
+  room.roundId = randomUUID();
   room.gameId += 1;
   room.version = 0;
   room.turnId = 1;
   room.turnPlayerId = room.players[0]?.id;
-  room.deadline = Date.now() + TURN_LIMIT_MS;
+  room.deadline = Date.now() + TURN_LIMITS[room.difficulty];
   room.moving = false;
   room.paused = false;
   room.pausedRemainingMs = 0;
@@ -174,7 +233,7 @@ function advanceTurn(roomId, room) {
   }
   room.turnPlayerId = next;
   room.turnId += 1;
-  room.deadline = Date.now() + TURN_LIMIT_MS;
+  room.deadline = Date.now() + TURN_LIMITS[room.difficulty];
   room.version += 1;
   broadcastState(roomId, room);
 }
@@ -184,16 +243,28 @@ function finishGame(roomId, room) {
   room.status = "finished";
   room.paused = false;
   room.moving = false;
-  room.state.winnerId = [...room.state.marbles].sort((a, b) => b.score - a.score)[0]?.id;
+  room.state.winnerId = room.state.marbles
+    .filter((marble) => !marble.eliminated)
+    .sort((a, b) => b.score - a.score)[0]?.id;
   room.deadline = 0;
-  room.players.forEach((player) => {
-    if (player.graceTimer) clearTimeout(player.graceTimer);
-    player.graceTimer = undefined;
-    player.reconnectToken = undefined;
-  });
+  const winner = room.state.marbles.find((marble) => marble.id === room.state.winnerId);
+  const winnerAccount = room.players.find((player) => player.id === winner?.id)?.memberId;
+  const memberId = room.practiceMemberId ?? winnerAccount;
+  if (memberId) {
+    const result = [room.roundId, memberId, room.practiceMemberId ? "practice" : "multi", winner?.score ?? 0];
+    accounts.record(...result).catch(() => {
+      setTimeout(() => accounts.record(...result).catch(() => {
+        console.error("Leaderboard result could not be saved");
+      }), 500).unref();
+    });
+  }
+  if (!room.players.some((player) => player.id === room.hostId && player.status !== "eliminated")) {
+    room.hostId = room.players.find((player) => player.status !== "eliminated")?.id;
+  }
   room.version += 1;
   broadcastState(roomId, room);
   io.to(roomId).emit("game:finished", { winnerId: room.state.winnerId });
+  publish(roomId);
   return true;
 }
 
@@ -213,11 +284,11 @@ function resumeIfReady(roomId, room) {
     }
     room.turnPlayerId = next;
     room.turnId += 1;
-    room.pausedRemainingMs = TURN_LIMIT_MS;
+    room.pausedRemainingMs = TURN_LIMITS[room.difficulty];
   }
   room.paused = false;
   room.deadline =
-    Date.now() + (room.pausedRemainingMs > 0 ? room.pausedRemainingMs : TURN_LIMIT_MS);
+    Date.now() + (room.pausedRemainingMs > 0 ? room.pausedRemainingMs : TURN_LIMITS[room.difficulty]);
   room.pausedRemainingMs = 0;
   room.version += 1;
   io.to(roomId).emit("game:resumed", {});
@@ -259,8 +330,8 @@ function eliminatePlayer(roomId, room, player, reason) {
     }
     room.turnPlayerId = next;
     room.turnId += 1;
-    room.deadline = Date.now() + TURN_LIMIT_MS;
-    room.pausedRemainingMs = TURN_LIMIT_MS;
+    room.deadline = Date.now() + TURN_LIMITS[room.difficulty];
+    room.pausedRemainingMs = TURN_LIMITS[room.difficulty];
   }
   if (room.status === "playing" && room.paused) {
     if (room.players.some((candidate) => candidate.status === "disconnected")) {
@@ -289,6 +360,11 @@ function pauseForDisconnect(roomId, room, player) {
 }
 
 function markDisconnected(socket, requestedRoom) {
+  if (socket.data.practiceRoom) {
+    rooms.delete(socket.data.practiceRoom);
+    socketRooms.delete(socket.id);
+    return;
+  }
   const id = roomIdOf(requestedRoom || socketRooms.get(socket.id));
   const room = rooms.get(id);
   const player = room?.players.find((candidate) => candidate.socketId === socket.id);
@@ -300,11 +376,11 @@ function markDisconnected(socket, requestedRoom) {
   pauseForDisconnect(id, room, player);
   player.graceTimer = setTimeout(() => {
     if (player.status !== "disconnected") return;
-    if (room.status === "waiting") {
+    if (room.status !== "playing") {
       room.players = room.players.filter((candidate) => candidate.id !== player.id);
       player.reconnectToken = undefined;
-      if (room.hostId === player.id) room.hostId = room.players[0]?.id;
-      if (room.players.length === 0) rooms.delete(id);
+      if (room.hostId === player.id) room.hostId = room.players.find((candidate) => candidate.status !== "eliminated")?.id;
+      if (room.players.every((candidate) => candidate.status === "eliminated")) removeRoom(id, room);
       else publish(id);
       return;
     }
@@ -317,6 +393,13 @@ function markDisconnected(socket, requestedRoom) {
 }
 
 function leaveRoom(socket, requestedRoom) {
+  if (socket.data.practiceRoom === requestedRoom && requestedRoom) {
+    rooms.delete(requestedRoom);
+    socketRooms.delete(socket.id);
+    socket.leave(requestedRoom);
+    delete socket.data.practiceRoom;
+    return;
+  }
   const id = roomIdOf(requestedRoom || socketRooms.get(socket.id));
   const room = rooms.get(id);
   const player = room?.players.find((candidate) => candidate.socketId === socket.id);
@@ -330,10 +413,10 @@ function leaveRoom(socket, requestedRoom) {
   }
   room.players = room.players.filter((candidate) => candidate.id !== player.id);
   player.reconnectToken = undefined;
-  if (room.players.length === 0) rooms.delete(id);
+  if (room.players.every((candidate) => candidate.status === "eliminated")) removeRoom(id, room);
   else {
     if (!room.players.some((candidate) => candidate.id === room.hostId))
-      room.hostId = room.players[0].id;
+      room.hostId = room.players.find((candidate) => candidate.status !== "eliminated")?.id;
     publish(id);
   }
 }
@@ -345,7 +428,29 @@ setInterval(() => {
   }
 }, 250);
 
+io.use((socket, next) => {
+  if (!origins.includes("*") && socket.handshake.headers.origin &&
+      !origins.includes(socket.handshake.headers.origin)) {
+    return next(new Error("Origin not allowed"));
+  }
+  accounts.member(socket.request).then((member) => {
+    if (!member) return next(new Error("AUTH_REQUIRED"));
+    socket.data.member = member;
+    next();
+  }, () => next(new Error("Account service unavailable")));
+});
+
 io.on("connection", (socket) => {
+  socket.on("lobby:watch", () => {
+    if (socket.rooms.has(publicLobby)) return;
+    socket.join(publicLobby);
+    const entries = [];
+    for (const [roomId, room] of rooms) {
+      if (room.status === "waiting") entries.push(lobbyEntry(roomId, room));
+    }
+    socket.emit("lobby:rooms", entries);
+  });
+  socket.on("lobby:unwatch", () => socket.leave(publicLobby));
   const rateBuckets = {
     create: [],
     join: [],
@@ -360,18 +465,41 @@ io.on("connection", (socket) => {
     return true;
   };
 
+  socket.on("practice:start", (_payload, ack) => {
+    const { id: memberId, nickname } = socket.data.member;
+    if (socketRooms.has(socket.id) || rooms.size >= MAX_ROOM_COUNT ||
+        !allowRate("create", CREATE_ROOM_RATE_LIMIT)) {
+      return emitAck(ack, { ok: false, error: "기록을 저장하는 연습 경기를 시작할 수 없습니다." });
+    }
+    const id = randomUUID();
+    const players = Array.from({ length: 4 }, (_, i) => ({
+      id: i, name: `${nickname} ${i + 1}`, status: "connected", socketId: socket.id,
+    }));
+    const room = {
+      hostId: 0, maxPlayers: 4, gameId: 0, difficulty: "normal", players, practiceMemberId: memberId,
+    };
+    rooms.set(id, room);
+    socketRooms.set(socket.id, id);
+    socket.data.practiceRoom = id;
+    socket.join(id);
+    startRound(id, room);
+    emitAck(ack, { ok: true, round: gameStartData(id, room, players[0]) });
+  });
+
   socket.on("room:create", (payload, ack) => {
     if (!allowRate("create", CREATE_ROOM_RATE_LIMIT))
       return emitError(socket, "요청이 너무 많습니다. 잠시 후 다시 시도하세요.", ack);
     if (socketRooms.has(socket.id)) return emitError(socket, "먼저 현재 방에서 나가세요.", ack);
     const maxPlayers = Number(payload?.maxPlayers);
+    const title = typeof payload?.title === "string" ? payload.title.trim() : "";
+    if (!title || title.length > 40 || /[\p{Cc}]/u.test(title))
+      return emitError(socket, "방 제목은 1~40자로 입력해 주세요.", ack);
     if (
-      !validName(payload?.name) ||
       !Number.isInteger(maxPlayers) ||
       maxPlayers < 2 ||
       maxPlayers > 4
     )
-      return emitError(socket, "닉네임은 1~10자, 인원수는 2~4명이어야 합니다.", ack);
+      return emitError(socket, "인원수는 2~4명이어야 합니다.", ack);
     if (rooms.size >= MAX_ROOM_COUNT)
       return emitError(socket, "생성 가능한 방 한도를 초과했습니다.", ack);
     let roomId;
@@ -385,11 +513,14 @@ io.on("connection", (socket) => {
     const player = {
       id: 0,
       socketId: socket.id,
-      name: payload.name.trim(),
+      name: socket.data.member.nickname,
+      memberId: socket.data.member.id,
       status: "connected",
       reconnectToken: randomBytes(32).toString("hex"),
     };
     const room = {
+      title,
+      creatorName: player.name,
       hostId: 0,
       maxPlayers,
       status: "waiting",
@@ -400,6 +531,7 @@ io.on("connection", (socket) => {
       turnId: 0,
       turnPlayerId: 0,
       deadline: 0,
+      difficulty: "normal",
       moving: false,
       paused: false,
       pausedRemainingMs: 0,
@@ -428,12 +560,16 @@ io.on("connection", (socket) => {
     if (!room) return emitError(socket, "방을 찾을 수 없습니다.", ack);
     if (room.status !== "waiting")
       return emitError(socket, "진행 중인 방에는 참여할 수 없습니다.", ack);
-    if (room.players.length >= room.maxPlayers || !validName(payload?.name))
-      return emitError(socket, "방이 가득 찼거나 닉네임이 올바르지 않습니다.", ack);
+    const { id: memberId, nickname } = socket.data.member;
+    if (room.players.some((player) => player.memberId === memberId))
+      return emitError(socket, "같은 계정으로 이미 방에 참여했습니다.", ack);
+    if (room.players.length >= room.maxPlayers)
+      return emitError(socket, "방이 가득 찼습니다.", ack);
     const player = {
       id: room.nextId++,
       socketId: socket.id,
-      name: payload.name.trim(),
+      name: nickname,
+      memberId,
       status: "connected",
       reconnectToken: randomBytes(32).toString("hex"),
     };
@@ -452,20 +588,9 @@ io.on("connection", (socket) => {
       return emitError(socket, "먼저 현재 방에서 나가세요.", ack);
     const room = rooms.get(id);
     const player = room?.players.find((candidate) => candidate.reconnectToken === token);
-    if (!room || !player || player.status === "eliminated" || room.status === "finished")
+    if (!room || !player || player.status === "eliminated" ||
+        player.memberId !== socket.data.member.id)
       return emitError(socket, "재접속 세션이 만료되었습니다.", ack);
-    const gameStartData =
-      room.status === "playing"
-        ? {
-            roomId: id,
-            gameId: room.gameId,
-            playerId: player.id,
-            turnId: room.turnId,
-            deadline: room.deadline,
-            players: room.players.map(({ id: playerId, name }) => ({ id: playerId, name })),
-            state: snapshot(room),
-          }
-        : undefined;
     if (player.socketId === socket.id && mappedRoom === id) {
       emitAck(ack, {
         ok: true,
@@ -473,7 +598,7 @@ io.on("connection", (socket) => {
         status: room.status,
         room: roomSummary(id, room),
         state: room.status === "playing" ? snapshot(room) : undefined,
-        gameStartData,
+        gameStartData: room.status === "waiting" ? undefined : gameStartData(id, room, player),
       });
       return;
     }
@@ -493,16 +618,15 @@ io.on("connection", (socket) => {
     if (room.status === "playing" && !disconnected && wasPaused) resumeIfReady(id, room);
     io.to(id).emit("player:reconnected", { playerId: player.id });
     publish(id);
-    if (room.status === "playing") {
-      socket.emit("game:start", gameStartData);
-    }
+    const round = room.status === "waiting" ? undefined : gameStartData(id, room, player);
+    if (round) socket.emit("game:start", round);
     emitAck(ack, {
       ok: true,
       playerId: player.id,
       status: room.status,
       room: roomSummary(id, room),
       state: room.status === "playing" ? snapshot(room) : undefined,
-      gameStartData,
+      gameStartData: round,
     });
   });
 
@@ -517,19 +641,22 @@ io.on("connection", (socket) => {
       room.players.some((player) => player.status !== "connected")
     )
       return emitError(socket, "게임을 시작할 수 없습니다.", ack);
-    resetGameState(room);
-    room.status = "playing";
-    room.players.forEach((player) =>
-      io.to(player.socketId).emit("game:start", {
-        roomId: id,
-        gameId: room.gameId,
-        playerId: player.id,
-        turnId: room.turnId,
-        deadline: room.deadline,
-        players: room.players.map(({ id: playerId, name }) => ({ id: playerId, name })),
-        state: snapshot(room),
-      }),
-    );
+    startRound(id, room);
+    emitAck(ack, { ok: true });
+  });
+
+  socket.on("room:rematch", (payload, ack) => {
+    const id = gameRoomIdOf(payload?.roomId, socket);
+    const room = rooms.get(id);
+    const player = room?.players.find((candidate) => candidate.socketId === socket.id);
+    const difficulty = payload?.difficulty;
+    if (typeof difficulty !== "string" || !Object.hasOwn(TURN_LIMITS, difficulty))
+      return emitAck(ack, { ok: false, error: "올바른 난이도를 선택해 주세요." });
+    if (!room || !player || player.id !== room.hostId || payload?.gameId !== room.gameId || !canRematch(room))
+      return emitAck(ack, { ok: false, error: "모든 참가자가 연결되어 있고 두 명 이상일 때 방장이 재대결할 수 있습니다." });
+    room.players = room.players.filter((candidate) => candidate.status === "connected");
+    room.difficulty = difficulty;
+    startRound(id, room);
     emitAck(ack, { ok: true });
   });
 
@@ -541,9 +668,10 @@ io.on("connection", (socket) => {
   socket.on("game:move", (payload, ack) => {
     if (!allowRate("move", MOVE_RATE_LIMIT))
       return emitError(socket, "입력이 너무 빠릅니다. 잠시 후 다시 시도하세요.", ack);
-    const id = roomIdOf(payload?.roomId);
+    const id = gameRoomIdOf(payload?.roomId, socket);
     const room = rooms.get(id);
-    const player = room?.players.find((candidate) => candidate.socketId === socket.id);
+    const player = room?.players.find((candidate) => candidate.socketId === socket.id &&
+      (!room.practiceMemberId || candidate.id === room.turnPlayerId));
     const x = payload?.x;
     const y = payload?.y;
     const requestId = validRequestId(payload?.requestId) ? payload.requestId : "";
@@ -569,7 +697,7 @@ io.on("connection", (socket) => {
       requestId === room.lastRequestId ||
       !hasValidCoordinates ||
       distance < 8 ||
-      distance > MAX_MOVE_DISTANCE ||
+      distance > MAX_MOVE_DISTANCE + 1e-6 ||
       Date.now() > room.deadline
     ) {
       return emitError(socket, "유효하지 않거나 만료된 턴 입력입니다.", ack);
@@ -627,6 +755,7 @@ io.on("connection", (socket) => {
       if (current.lion) {
         other.alive = false;
         current.score += 2;
+        io.to(id).emit("game:lion-hit", { gameId: room.gameId, x: other.x, y: other.y });
       } else if (other.lion) {
         current.alive = false;
       } else {

@@ -4,6 +4,7 @@ import {
   MOVE_RANDOM,
   PUSH_DISTANCE_BASE,
   PUSH_DISTANCE_PER_FORCE,
+  TURN_SECONDS,
 } from "./constants";
 
 export type Hole = { id: number; x: number; y: number };
@@ -47,7 +48,6 @@ export const HOLES: Hole[] = [
 
 const MARBLE_RADIUS = 25 / 2;
 const HOLE_RADIUS = 35 / 2;
-const TURN_LIMIT_MS = 10_000;
 const SHOT_DURATION_MS = 1500;
 const PUSH_DURATION_MS = 850;
 
@@ -56,22 +56,26 @@ export class System {
   private readonly marbles: Marble[];
   private readonly holes = HOLES;
   private state: GameState = "wait_move";
-  private remainingSeconds = 10;
+  private remainingSeconds: number;
   private turnStartedAt = Date.now();
   private timer: ReturnType<typeof setInterval> | undefined;
   private winner: Marble | undefined;
   private destroyed = false;
   private frameIds = new Set<number>();
   private readonly indexById = new Map<number, number>();
-  private lastRenderedSeconds = 10;
+  private lastRenderedSeconds: number;
   private serverAnimationToken = 0;
+  private serverAnimatingTurn = false;
 
   constructor(
     playerIds: number[],
     private readonly renderFunction: RenderFunction,
     names: string[] = [],
     private readonly serverControlled = false,
+    private readonly onLionHit?: (x: number, y: number) => void,
+    private readonly turnSeconds: number = TURN_SECONDS.normal,
   ) {
+    this.remainingSeconds = this.lastRenderedSeconds = turnSeconds;
     this.marbles = playerIds.map((id, i) => ({
       id,
       name: names[i] ?? `플레이어 ${i + 1}`,
@@ -147,7 +151,7 @@ export class System {
       turn: this.turn,
       holes: this.holes,
       marbles: this.marbles,
-      state: this.state,
+      state: this.state === "wait_move" && this.serverAnimatingTurn ? "moving" : this.state,
       remainingSeconds: this.remainingSeconds,
       winner: this.winner,
     };
@@ -169,7 +173,8 @@ export class System {
     const index = this.indexById.get(playerId);
     if (this.destroyed || index === undefined || !this.marbles[index]?.alive) return;
     this.turn = playerId;
-    this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - remainingMs);
+    this.serverAnimatingTurn = false;
+    this.turnStartedAt = Date.now() - (this.turnSeconds * 1000 - remainingMs);
     this.remainingSeconds = Math.ceil(Math.max(0, remainingMs) / 1000);
     this.state = "wait_move";
     this.lastRenderedSeconds = this.remainingSeconds;
@@ -192,12 +197,16 @@ export class System {
       this.marbles.map((marble) => [marble.id, { x: marble.x, y: marble.y }]),
     );
     const incoming = new Map(state.marbles.map((marble) => [marble.id, marble]));
+    let hasMovement = false;
+    this.serverAnimatingTurn = false;
     this.marbles.forEach((marble) => {
       const next = incoming.get(marble.id);
       if (next) {
         const position = previousPositions.get(marble.id);
         Object.assign(marble, next);
-        if (position) {
+        if (position && (position.x !== next.x || position.y !== next.y)) {
+          hasMovement = true;
+          if (marble.id === state.turnPlayerId) this.serverAnimatingTurn = true;
           marble.x = position.x;
           marble.y = position.y;
         }
@@ -213,10 +222,14 @@ export class System {
       state.state === "paused"
         ? (state.pausedRemainingMs ?? 0)
         : Math.max(0, state.deadline - Date.now());
-    this.turnStartedAt = Date.now() - (TURN_LIMIT_MS - remainingMs);
+    this.turnStartedAt = Date.now() - (this.turnSeconds * 1000 - remainingMs);
     this.remainingSeconds = Math.ceil(remainingMs / 1000);
     this.lastRenderedSeconds = this.remainingSeconds;
     const token = ++this.serverAnimationToken;
+    if (!hasMovement) {
+      this.render();
+      return;
+    }
     const start = performance.now();
     const duration = SHOT_DURATION_MS;
     const animate = (timestamp: number) => {
@@ -231,6 +244,7 @@ export class System {
           marble.y = from.y + (target.y - from.y) * eased;
         }
       });
+      if (progress === 1) this.serverAnimatingTurn = false;
       this.render();
       if (progress < 1) this.trackFrame(animate);
     };
@@ -241,7 +255,7 @@ export class System {
     if (this.state === "finished") return;
     this.remainingSeconds = Math.max(
       0,
-      Math.ceil((TURN_LIMIT_MS - (Date.now() - this.turnStartedAt)) / 1000),
+      Math.ceil((this.turnSeconds * 1000 - (Date.now() - this.turnStartedAt)) / 1000),
     );
     if (this.remainingSeconds !== this.lastRenderedSeconds) {
       this.lastRenderedSeconds = this.remainingSeconds;
@@ -261,7 +275,7 @@ export class System {
       if (!this.marbles[nextTurn].alive) continue;
       this.turn = this.marbles[nextTurn].id;
       this.turnStartedAt = Date.now();
-      this.remainingSeconds = 10;
+      this.remainingSeconds = this.turnSeconds;
       return;
     }
     this.checkWinner();
@@ -291,6 +305,7 @@ export class System {
       if (marble.lion) {
         other.alive = false;
         marble.score += 2;
+        this.onLionHit?.(other.x, other.y);
       } else if (other.lion) {
         marble.alive = false;
       } else {

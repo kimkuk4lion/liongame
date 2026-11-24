@@ -17,7 +17,7 @@ Liongame은 Phaser 기반의 웹 구슬 게임입니다. 혼자 연습하거나,
 ## 주요 기능
 
 - **연습 모드:** 구슬 4개로 게임 플레이
-- **멀티플레이:** 2~4인 방 생성·참가 및 턴제 대전
+- **멀티플레이:** 방 제목과 최대 인원을 정해 방을 만들거나, 공개 대기실에서 개설자와 참가 인원을 확인하고 입장
 - **턴 제한:** 각 플레이어에게 10초의 행동 시간
 - **점수·결과:** 구멍 진입과 충돌 등에 따른 점수 계산, 종료 후 점수판 제공
 - **타격 조절:** 클릭 위치에 따라 힘이 달라지고 충돌 시 구슬이 밀려나는 상호작용
@@ -32,6 +32,7 @@ Liongame은 Phaser 기반의 웹 구슬 게임입니다. 혼자 연습하거나,
 | 게임 클라이언트 | Phaser 3, TypeScript |
 | 빌드·개발 서버 | Vite 6 |
 | 실시간 통신 | Socket.IO 4 (클라이언트·서버) |
+| 데이터베이스 | PostgreSQL, Prisma ORM |
 | 서버 런타임 | Node.js (운영 CI: 24) |
 | 프론트엔드 배포 | Vite 정적 빌드 (`docs/`) |
 | CI/CD | GitHub Actions, SSH, rsync |
@@ -42,7 +43,7 @@ Liongame은 Phaser 기반의 웹 구슬 게임입니다. 혼자 연습하거나,
 ### 요구 환경
 
 - Git
-- Node.js 및 npm (Node.js 24 권장: 배포 워크플로와 동일)
+- Node.js 22.12 이상 및 npm (운영과 배포 워크플로는 Node.js 24 권장)
 
 ### 설치
 
@@ -60,35 +61,59 @@ git switch development
 
 ### 환경변수
 
-저장소의 `.env.example`을 참고하여 로컬용 `.env.development`를 생성합니다.
+저장소의 `.env.example`을 복사해 로컬용 `.env`를 만듭니다. 이미 `.env`가 있으면 필요한 항목만 입력합니다.
 
 **Windows PowerShell**
 
 ```powershell
-Copy-Item .env.example .env.development
+Copy-Item .env.example .env
 ```
 
 **macOS / Linux**
 
 ```bash
-cp .env.example .env.development
+cp .env.example .env
 ```
 
 예시:
 
 ```dotenv
-VITE_SOCKET_URL=http://localhost:3001
 PORT=3001
 CORS_ORIGIN=http://localhost:8080
+APP_URL=http://localhost:8080/
+KAKAO_REST_API_KEY=
+KAKAO_CLIENT_SECRET=
+KAKAO_REDIRECT_URI=http://localhost:8080/api/auth/kakao/callback
+DATABASE_URL=
 ```
 
 | 변수 | 사용처 | 설명 |
 | --- | --- | --- |
-| `VITE_SOCKET_URL` | 브라우저 클라이언트 | Socket.IO 연결 주소. `VITE_` 변수는 브라우저 번들에 포함됩니다. |
+| `VITE_SOCKET_URL` | 브라우저 클라이언트 | Socket.IO 주소를 별도로 지정할 때 사용합니다. 기본은 게임 페이지와 같은 origin입니다. |
 | `PORT` | Node.js 서버 | Socket.IO 서버가 수신할 포트 |
 | `CORS_ORIGIN` | Node.js 서버 | 허용할 프론트엔드 Origin |
+| `APP_URL` | Node.js 서버 | 카카오 로그인에 필요한 공개 게임 주소. 로그인 완료 후 이동과 계정 변경 요청의 출처 검증에 사용합니다. |
+| `KAKAO_REST_API_KEY` | Node.js 서버 | 카카오 앱 REST API 키 |
+| `KAKAO_CLIENT_SECRET` | Node.js 서버 | 카카오 앱에서 발급한 클라이언트 시크릿 |
+| `KAKAO_REDIRECT_URI` | Node.js 서버 | 카카오 앱에 등록한 전체 콜백 주소 |
+| `DATABASE_URL` | Node.js 서버 | PostgreSQL 연결 주소. 형식은 `postgresql://사용자:비밀번호@호스트:5432/데이터베이스`입니다. |
 
-`.env.development` 및 `.env.production`은 Git 추적에서 제외됩니다. 비밀키는 `VITE_` 변수에 넣지 마세요.
+`.env`, `.env.development`, `.env.production`은 Git 추적에서 제외됩니다. 비밀키는 `VITE_` 변수에 넣지 마세요.
+
+카카오 개발자 콘솔에서 카카오 로그인을 활성화하고 `KAKAO_REDIRECT_URI`와 일치하는 주소를 등록합니다. 로컬에서는 게임과 콜백 모두 `localhost` 주소를 사용하세요. 카카오 로그인에서 이메일 동의 화면을 없애려면 카카오 개발자 콘솔에서도 **카카오계정(이메일)** 동의항목을 사용 안 함으로 설정합니다. 최초 가입 시 한글 단어 4글자와 숫자 4자리로 닉네임을 생성합니다. 마이페이지에서 닉네임을 변경할 수 있으며 순위표에는 게임 닉네임이 표시됩니다. [카카오 로그인 설정](https://developers.kakao.com/docs/ko/kakaologin/prerequisite)
+
+PostgreSQL에 애플리케이션용 데이터베이스와 사용자를 만든 뒤 `DATABASE_URL`을 입력합니다. 비어 있는 데이터베이스는 서버를 시작하기 전에 `npm run db:deploy`로 초기 마이그레이션을 적용합니다. 연습과 멀티플레이에는 카카오 로그인이 필요하며 계정 닉네임을 사용합니다. 순위표에는 연습 최고 점수와 멀티플레이 승리 횟수 기준으로 각각 상위 10명이 표시됩니다.
+
+### 기존 데이터베이스에 Prisma 적용
+
+기존 게임 서버가 만든 `lion_members`, `lion_sessions`, `lion_results` 테이블을 사용하는 경우, 먼저 데이터베이스를 백업하고 현재 구조를 [초기 마이그레이션](prisma/migrations/0_init/migration.sql)과 대조합니다. 초기 마이그레이션에 적힌 테이블과 제약 조건이 이미 있으면 해당 마이그레이션을 적용된 상태로 한 번만 등록합니다. 이전에 추가한 nullable 컬럼도 이 등록 과정에서 보존됩니다.
+
+```powershell
+npx prisma migrate resolve --applied 0_init
+npm run db:deploy
+```
+
+Prisma CLI는 `.env.development`의 `DATABASE_URL`을 우선 사용하고, 해당 항목이 없으면 `.env`를 사용합니다. `NODE_ENV=production`에서는 `.env.production`을 사용합니다. 프로세스 환경에 직접 지정한 `DATABASE_URL`이 가장 우선합니다. `npm run db:studio`로 연결된 데이터베이스의 회원과 경기 기록을 확인할 수 있습니다.
 
 ### 로컬 실행
 
@@ -113,10 +138,12 @@ npm run dev
 | --- | --- |
 | `npm ci` | 잠금 파일 기준 의존성 설치 |
 | `npm run dev` | Vite 개발 서버 실행 |
-| `npm run server` | `.env.development`로 Socket.IO 서버 실행 |
+| `npm run server` | `.env`와 선택적인 `.env.development`를 읽어 서버 실행 |
 | `npm run typecheck` | TypeScript 타입 검사 |
 | `npm run build` | 프로덕션 정적 빌드 (`docs/` 출력) |
-| `npm run server:prod` | `.env.production`으로 Socket.IO 서버 실행 |
+| `npm run db:deploy` | 대기 중인 Prisma 마이그레이션 적용 |
+| `npm run db:studio` | Prisma Studio 열기 |
+| `npm run server:prod` | `.env`와 선택적인 `.env.production`을 읽어 서버 실행 |
 
 `server` / `server:prod` 명령은 Node.js의 `--env-file` 옵션을 사용하므로 해당 옵션을 지원하는 Node.js 버전이 필요합니다.
 
@@ -126,11 +153,11 @@ npm run dev
 브라우저
   └─ https://game.cloudxt.app
        ├─ 정적 게임 리소스 (Vite 빌드: docs/)
-       └─ /socket.io/ → 실시간 통신 서버
+       └─ /socket.io/, /api/ → 게임 서버
                            └─ Node.js + Socket.IO (PM2 관리)
 ```
 
-게임 페이지와 Socket.IO 요청은 같은 공개 도메인 `game.cloudxt.app`을 사용합니다. 실제 리버스 프록시 및 내부 포트 연결은 운영 서버의 Nginx 설정에 따라 달라질 수 있습니다.
+운영 Nginx에서 같은 도메인의 `/api/`를 기존 Socket.IO 백엔드 포트로 프록시하고 경로를 유지합니다. 운영 환경의 `APP_URL`, `CORS_ORIGIN`, `KAKAO_REDIRECT_URI`에는 공개 HTTPS 주소를 사용합니다.
 
 ### CI/CD
 
@@ -139,8 +166,8 @@ npm run dev
 1. GitHub Actions(ubuntu-24.04)에서 Node.js 24 구성
 2. `npm ci` 및 `npm run typecheck` 실행
 3. `VITE_SOCKET_URL=https://game.cloudxt.app`으로 `npm run build` 실행
-4. 빌드 결과(`docs/`), 서버 코드(`server/`), 패키지 파일을 SSH/rsync로 `/var/www/liongame`에 전송
-5. 배포 서버에서 운영 의존성 설치 후 `liongame-server` PM2 프로세스 재시작·저장
+4. 빌드 결과(`docs/`), 서버 코드(`server/`), Prisma 설정과 마이그레이션, 패키지 파일을 SSH/rsync로 `/var/www/liongame`에 전송
+5. 배포 서버에서 운영 의존성을 설치하고 Prisma Client를 생성한 뒤 `liongame-server` PM2 프로세스를 재시작
 
 GitHub Actions에 필요한 Secrets:
 
@@ -153,6 +180,8 @@ GitHub Actions에 필요한 Secrets:
 
 > **운영 환경 유의사항:** 현재 워크플로는 `.env.production`을 서버로 복사하지 않습니다. 서버 측 설정 파일과 PM2의 환경변수 로딩 방식은 별도로 구성해야 합니다. `pm2 restart --update-env`만으로 `.env.production`을 자동으로 읽는 것은 아닙니다.
 
+Prisma를 처음 배포하기 전 운영 DB에 초기 마이그레이션을 등록하거나 적용합니다. 이후 스키마가 변경되는 릴리스도 서버 재시작 전에 대상 DB에 마이그레이션을 적용합니다.
+
 ### 운영 환경변수 예시
 
 운영 서버의 `/var/www/liongame/.env.production` 예시:
@@ -161,6 +190,11 @@ GitHub Actions에 필요한 Secrets:
 VITE_SOCKET_URL=https://game.cloudxt.app
 PORT=3001
 CORS_ORIGIN=https://game.cloudxt.app
+APP_URL=https://game.cloudxt.app/
+KAKAO_REST_API_KEY=
+KAKAO_CLIENT_SECRET=
+KAKAO_REDIRECT_URI=https://game.cloudxt.app/api/auth/kakao/callback
+DATABASE_URL=
 ```
 
 여기서 포트 3001은 프로젝트의 기본값이며, 실제 운영 포트는 서버 설정을 확인해야 합니다. 정적 클라이언트의 `VITE_SOCKET_URL`은 GitHub Actions 빌드 환경에서 설정합니다.

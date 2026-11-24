@@ -67,7 +67,9 @@ jobs:
             server/ "$TARGET:$DEST/server/"
 
           rsync -az -e "$SSH_CMD" \
-            package.json package-lock.json \
+            prisma/ "$TARGET:$DEST/prisma/"
+          rsync -az -e "$SSH_CMD" \
+            package.json package-lock.json prisma.config.mjs \
             "$TARGET:$DEST/"
 
           ssh -i ~/.ssh/deploy_key \
@@ -76,6 +78,6 @@ jobs:
           set -e
           cd /var/www/liongame
           npm ci --omit=dev
-          pm2 restart liongame-server --update-env
+          NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--experimental-strip-types" pm2 restart liongame-server --update-env
           pm2 save
           EOF
