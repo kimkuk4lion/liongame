@@ -130,6 +130,24 @@ input, select { width: 100%; min-width: 0; background: #101e18; color: inherit; 
 .result-actions .status { margin: 8px 0 0; min-height: 0; }
 .result-actions .status:empty { display: none; }
 
+.game-guide {
+  position: absolute;
+  z-index: 1;
+  top: 18%;
+  inset-inline: 0;
+  width: min(calc(100% - 24px), 320px);
+  margin-inline: auto;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+  color: #f7f1df;
+  font-size: .875rem;
+  line-height: 1.45;
+  pointer-events: none;
+}
+.game-guide strong { display: block; margin-bottom: 3px; color: var(--gold); }
+
 @media (max-width: 520px) {
   .mode-grid, .room-options { grid-template-columns: 1fr; }
   button.mode-card { min-height: 0; }

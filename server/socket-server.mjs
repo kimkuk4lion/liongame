@@ -589,7 +589,7 @@ io.on("connection", (socket) => {
       requestId === room.lastRequestId ||
       !hasValidCoordinates ||
       distance < 8 ||
-      distance > MAX_MOVE_DISTANCE ||
+      distance > MAX_MOVE_DISTANCE + 1e-6 ||
       Date.now() > room.deadline
     ) {
       return emitError(socket, "유효하지 않거나 만료된 턴 입력입니다.", ack);

@@ -20,6 +20,7 @@ export type GameSettings = {
   hostId?: number;
   rematchReady?: boolean;
   onFinished?: () => void;
+  onReady?: () => void;
   onExit?: () => void;
   onAbort?: () => void;
 };
@@ -520,7 +521,7 @@ function clearSession() {
   }
 }
 
-function start(settings: GameSettings) {
+function start(settings: GameSettings, showGuide = true) {
   clearNavigationTimer();
   disposeRound?.();
   const root = document.getElementById("game-container")!;
@@ -532,6 +533,13 @@ function start(settings: GameSettings) {
   let active = true;
   let room = { hostId: settings.hostId, rematchReady: settings.rematchReady };
   let updateActions: (() => void) | undefined;
+  let guide: HTMLElement | undefined;
+  let guideTimer: number | undefined;
+  const removeGuide = () => {
+    window.clearTimeout(guideTimer);
+    guide?.remove();
+    guide = undefined;
+  };
   const onRoomUpdate = (update: WaitingRoomUpdate) => {
     if (update.roomId !== settings.roomId) return;
     room = { hostId: update.hostId, rematchReady: update.rematchReady };
@@ -551,7 +559,7 @@ function start(settings: GameSettings) {
       playerIds: data.players.map((player) => player.id),
       names: data.players.map((player) => player.name),
       initialState: data.state,
-    });
+    }, data.gameId !== settings.gameId);
   };
   if (currentSocket) {
     currentSocket.on("game:start", onNextRound);
@@ -559,6 +567,7 @@ function start(settings: GameSettings) {
   }
   disposeRound = () => {
     active = false;
+    removeGuide();
     currentSocket?.off("game:start", onNextRound);
     currentSocket?.off("room:update", onRoomUpdate);
     disposeRound = undefined;
@@ -572,6 +581,7 @@ function start(settings: GameSettings) {
   };
   const onFinished = () => {
     if (!active) return;
+    removeGuide();
     const form = document.createElement("form");
     form.className = "result-actions";
     form.innerHTML = `
@@ -632,6 +642,16 @@ function start(settings: GameSettings) {
   game = StartGame("game-container", {
     ...settings,
     onFinished,
+    onReady: () => {
+      if (!active || !showGuide) return;
+      guide = document.createElement("aside");
+      guide.className = "game-guide";
+      guide.setAttribute("role", "status");
+      guide.innerHTML = `<strong>게임 방법</strong>
+        <span>내 차례에 구슬을 누르고, 보낼 방향의 반대로 당겼다가 놓으세요.</span>`;
+      root.append(guide);
+      guideTimer = window.setTimeout(removeGuide, 4000);
+    },
     onExit: () => leaveRound(onExit),
     onAbort: onAbort ? () => leaveRound(onAbort) : undefined,
   });
