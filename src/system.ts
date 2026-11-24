@@ -65,6 +65,7 @@ export class System {
   private readonly indexById = new Map<number, number>();
   private lastRenderedSeconds: number;
   private serverAnimationToken = 0;
+  private serverAnimatingTurn = false;
 
   constructor(
     playerIds: number[],
@@ -150,7 +151,7 @@ export class System {
       turn: this.turn,
       holes: this.holes,
       marbles: this.marbles,
-      state: this.state,
+      state: this.state === "wait_move" && this.serverAnimatingTurn ? "moving" : this.state,
       remainingSeconds: this.remainingSeconds,
       winner: this.winner,
     };
@@ -172,6 +173,7 @@ export class System {
     const index = this.indexById.get(playerId);
     if (this.destroyed || index === undefined || !this.marbles[index]?.alive) return;
     this.turn = playerId;
+    this.serverAnimatingTurn = false;
     this.turnStartedAt = Date.now() - (this.turnSeconds * 1000 - remainingMs);
     this.remainingSeconds = Math.ceil(Math.max(0, remainingMs) / 1000);
     this.state = "wait_move";
@@ -195,12 +197,16 @@ export class System {
       this.marbles.map((marble) => [marble.id, { x: marble.x, y: marble.y }]),
     );
     const incoming = new Map(state.marbles.map((marble) => [marble.id, marble]));
+    let hasMovement = false;
+    this.serverAnimatingTurn = false;
     this.marbles.forEach((marble) => {
       const next = incoming.get(marble.id);
       if (next) {
         const position = previousPositions.get(marble.id);
         Object.assign(marble, next);
-        if (position) {
+        if (position && (position.x !== next.x || position.y !== next.y)) {
+          hasMovement = true;
+          if (marble.id === state.turnPlayerId) this.serverAnimatingTurn = true;
           marble.x = position.x;
           marble.y = position.y;
         }
@@ -220,6 +226,10 @@ export class System {
     this.remainingSeconds = Math.ceil(remainingMs / 1000);
     this.lastRenderedSeconds = this.remainingSeconds;
     const token = ++this.serverAnimationToken;
+    if (!hasMovement) {
+      this.render();
+      return;
+    }
     const start = performance.now();
     const duration = SHOT_DURATION_MS;
     const animate = (timestamp: number) => {
@@ -234,6 +244,7 @@ export class System {
           marble.y = from.y + (target.y - from.y) * eased;
         }
       });
+      if (progress === 1) this.serverAnimatingTurn = false;
       this.render();
       if (progress < 1) this.trackFrame(animate);
     };

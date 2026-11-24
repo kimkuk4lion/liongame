@@ -4,13 +4,14 @@ import { AIM_SENSITIVITY, GAME_HEIGHT, GAME_WIDTH, TURN_SECONDS } from "../../co
 import type { GameSettings } from "../../main";
 import { Marble, RenderArgs, System } from "../../system";
 
+const MIN_PULL_DISTANCE = 6;
+
 export class Game extends Scene {
   static initialSettings?: GameSettings;
   private settings!: GameSettings;
   private socket?: Socket;
   private system?: System;
-  private dragging = false;
-  private aimTurn = -1;
+  private aim?: { pointerId: number; turn: number; x: number; y: number };
   private requestSequence = 0;
   private latestVersion = 0;
   private aborted = false;
@@ -74,7 +75,8 @@ export class Game extends Scene {
       })
       .setOrigin(0.5);
     backButton.add([backBackground, backLabel]);
-    backBackground.on("pointerdown", () => {
+    backBackground.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (!pointer.wasTouch && pointer.button !== 0) return;
       if (
         this.settings.mode === "practice" ||
         this.system?.getSnapshot().state === "finished" ||
@@ -100,10 +102,11 @@ export class Game extends Scene {
     const playerIds =
       this.settings.playerIds ??
       Array.from({ length: this.settings.playerCount }, (_, index) => index);
+    let pendingShot: string | undefined;
     const system = new System(
       playerIds,
       (args) => {
-        if (this.dragging && (args.turn !== this.aimTurn || args.state !== "wait_move" || args.remainingSeconds === 0))
+        if (this.aim && (args.turn !== this.aim.turn || args.state !== "wait_move" || args.remainingSeconds === 0))
           this.cancelAim(aimLine, pullLine, trajectory, powerText);
         this.render(args, marbleImages, labels, description, guideLine);
       },
@@ -133,6 +136,7 @@ export class Game extends Scene {
       if (state.gameId !== this.settings.gameId || state.version <= this.latestVersion) return;
       this.latestVersion = state.version;
       this.settings.turnId = state.turnId;
+      pendingShot = undefined;
       this.cancelAim(aimLine, pullLine, trajectory, powerText);
       system.applyServerState(state);
     };
@@ -148,15 +152,6 @@ export class Game extends Scene {
       const onError = (message: string) => {
         if (system.getSnapshot().state === "finished") return;
         description.setText(message);
-        system.applyServerState({
-          version: this.latestVersion + 1,
-          gameId: this.settings.gameId ?? 0,
-          turnId: this.settings.turnId ?? 0,
-          turnPlayerId: system.getSnapshot().turn,
-          deadline: Date.now(),
-          state: "wait_move",
-          marbles: system.getSnapshot().marbles,
-        });
       };
       this.socket.on("game:error", onError);
       this.cleanup.push(() => this.socket?.off("game:error", onError));
@@ -210,7 +205,7 @@ export class Game extends Scene {
         if (this.aborted) return;
         this.aborted = true;
         description.setText(data.message);
-        this.cleanupAim(aimLine, pullLine, trajectory, powerText);
+        this.cancelAim(aimLine, pullLine, trajectory, powerText);
         this.abortTimer = window.setTimeout(() => this.settings.onAbort?.(), 800);
       };
       this.socket.on("game:aborted", onAborted);
@@ -219,7 +214,7 @@ export class Game extends Scene {
 
     system.render();
     const updateAim = (pointer: Phaser.Input.Pointer) => {
-      if (!this.dragging) return;
+      if (this.aim?.pointerId !== pointer.id) return;
       const snapshot = system.getSnapshot();
       const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
       if (!current) return;
@@ -251,32 +246,36 @@ export class Game extends Scene {
       trajectory.strokeCircle(endX, endY, 9);
     };
     this.input.on("pointerdown", (pointer: Phaser.Input.Pointer) => {
+      if (this.aborted || this.aim || pendingShot || (!pointer.wasTouch && pointer.button !== 0)) return;
       const snapshot = system.getSnapshot();
       const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
-      if (!current || !current.alive || snapshot.state !== "wait_move") return;
+      if (!current || !current.alive || snapshot.state !== "wait_move" || snapshot.remainingSeconds === 0) return;
       if (this.settings.mode === "multi" && current.id !== this.settings.playerId) return;
       if (Math.hypot(pointer.x - current.x, pointer.y - current.y) > 40) return;
-      this.dragging = true;
-      this.aimTurn = current.id;
+      this.aim = { pointerId: pointer.id, turn: current.id, x: pointer.x, y: pointer.y };
       updateAim(pointer);
     });
     this.input.on("pointermove", updateAim);
     const shoot = (pointer: Phaser.Input.Pointer) => {
-      if (!this.dragging) return;
-      this.cleanupAim(aimLine, pullLine, trajectory, powerText);
+      const aim = this.aim;
+      if (!aim || aim.pointerId !== pointer.id || (!pointer.wasTouch && pointer.button !== 0)) return;
+      this.cancelAim(aimLine, pullLine, trajectory, powerText);
+      if (pointer.wasCanceled || Math.hypot(pointer.x - aim.x, pointer.y - aim.y) < MIN_PULL_DISTANCE) return;
       const snapshot = system.getSnapshot();
       const current = snapshot.marbles.find((marble) => marble.id === snapshot.turn);
       if (
         !current || snapshot.state !== "wait_move" || snapshot.remainingSeconds === 0 ||
-        this.aimTurn !== snapshot.turn ||
+        aim.turn !== snapshot.turn ||
         (this.settings.mode === "multi" && current?.id !== this.settings.playerId)
       )
         return;
       const { x, y, travel } = aimTarget(current, pointer);
       if (travel < 8) return;
       if (this.socket) {
+        if (!this.socket.connected) return;
         const requestId = `${this.settings.gameId}-${this.settings.turnId}-${++this.requestSequence}`;
-        this.socket?.emit(
+        pendingShot = requestId;
+        this.socket.timeout(4000).emit(
           "game:move",
           {
             roomId: this.settings.roomId,
@@ -286,8 +285,9 @@ export class Game extends Scene {
             x,
             y,
           },
-          (result: { ok: boolean }) => {
-            if (!result?.ok) this.cancelAim(aimLine, pullLine, trajectory, powerText);
+          (error: Error | null, result?: { ok: boolean }) => {
+            if (pendingShot !== requestId) return;
+            if (error || !result?.ok) pendingShot = undefined;
           },
         );
       } else {
@@ -307,27 +307,15 @@ export class Game extends Scene {
     this.cleanup.push(() => window.removeEventListener("blur", onBlur));
     this.events.once("shutdown", () => this.cleanupScene());
     this.events.once("destroy", () => this.cleanupScene());
+    this.cleanup.push(() => { pendingShot = undefined; });
     if (system.getSnapshot().state !== "finished") this.settings.onReady?.();
   }
 
   private cleanupScene() {
-    this.dragging = false;
+    this.aim = undefined;
     if (this.abortTimer !== undefined) window.clearTimeout(this.abortTimer);
     this.cleanup.splice(0).forEach((dispose) => dispose());
     this.system?.destroy();
-  }
-
-  private cleanupAim(
-    aimLine: Phaser.GameObjects.Line,
-    pullLine: Phaser.GameObjects.Line,
-    trajectory: Phaser.GameObjects.Graphics,
-    powerText: Phaser.GameObjects.Text,
-  ) {
-    this.dragging = false;
-    aimLine.setVisible(false);
-    pullLine.setVisible(false);
-    trajectory.clear().setVisible(false);
-    powerText.setVisible(false);
   }
 
   private cancelAim(
@@ -336,8 +324,11 @@ export class Game extends Scene {
     trajectory: Phaser.GameObjects.Graphics,
     powerText: Phaser.GameObjects.Text,
   ) {
-    this.aimTurn = -1;
-    this.cleanupAim(aimLine, pullLine, trajectory, powerText);
+    this.aim = undefined;
+    aimLine.setVisible(false);
+    pullLine.setVisible(false);
+    trajectory.clear().setVisible(false);
+    powerText.setVisible(false);
   }
 
   private render(
