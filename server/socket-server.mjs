@@ -627,6 +627,7 @@ io.on("connection", (socket) => {
       if (current.lion) {
         other.alive = false;
         current.score += 2;
+        io.to(id).emit("game:lion-hit", { gameId: room.gameId, x: other.x, y: other.y });
       } else if (other.lion) {
         current.alive = false;
       } else {

@@ -105,6 +105,7 @@ export class Game extends Scene {
       (args) => this.render(args, marbleImages, labels, description, guideLine, powerText),
       this.settings.names,
       this.settings.mode === "multi",
+      (x, y) => this.showLionHit(x, y),
     );
     this.system = system;
     if (this.settings.mode === "multi" && this.settings.initialState) {
@@ -133,6 +134,11 @@ export class Game extends Scene {
     if (this.settings.mode === "multi") {
       if (!this.settings.socket) return;
       this.socket = this.settings.socket;
+      const onLionHit = (hit: { gameId: number; x: number; y: number }) => {
+        if (hit.gameId === this.settings.gameId) this.showLionHit(hit.x, hit.y);
+      };
+      this.socket.on("game:lion-hit", onLionHit);
+      this.cleanup.push(() => this.socket?.off("game:lion-hit", onLionHit));
       this.socket.on("game:state", onState);
       this.cleanup.push(() => this.socket?.off("game:state", onState));
       const onError = (message: string) => {
@@ -422,6 +428,34 @@ export class Game extends Scene {
     });
 
     if (args.winner && !this.children.getByName("scoreboard")) this.showScoreboard(args.marbles);
+  }
+
+  private showLionHit(x: number, y: number) {
+    const ring = this.add.circle(x, y, 16, 0xf1cc83, 0.25)
+      .setStrokeStyle(3, 0xffd166)
+      .setDepth(11);
+    const points = this.add.text(
+      Phaser.Math.Clamp(x, 36, this.scale.width - 36),
+      Math.max(60, y - 22),
+      "+2",
+      { color: "#ffe2a9", fontSize: "26px", fontStyle: "bold", stroke: "#192c25", strokeThickness: 5 },
+    ).setOrigin(0.5).setDepth(12);
+    this.tweens.add({
+      targets: ring,
+      scale: 3.5,
+      alpha: 0,
+      duration: 460,
+      ease: "Quad.Out",
+      onComplete: () => ring.destroy(),
+    });
+    this.tweens.add({
+      targets: points,
+      y: points.y - 30,
+      alpha: 0,
+      duration: 700,
+      ease: "Quad.Out",
+      onComplete: () => points.destroy(),
+    });
   }
 
   private showScoreboard(marbles: Marble[]) {

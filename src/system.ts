@@ -71,6 +71,7 @@ export class System {
     private readonly renderFunction: RenderFunction,
     names: string[] = [],
     private readonly serverControlled = false,
+    private readonly onLionHit?: (x: number, y: number) => void,
   ) {
     this.marbles = playerIds.map((id, i) => ({
       id,
@@ -291,6 +292,7 @@ export class System {
       if (marble.lion) {
         other.alive = false;
         marble.score += 2;
+        this.onLionHit?.(other.x, other.y);
       } else if (other.lion) {
         marble.alive = false;
       } else {
